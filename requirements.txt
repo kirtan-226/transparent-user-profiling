@@ -1,0 +1,8 @@
+dash==2.14.0
+dash-core-components==2.0.0
+dash-html-components==2.0.0
+flask==2.2.5
+pymongo==4.5.0
+requests==2.31.0
+pandas==2.0.3
+python-dotenv==1.0.0
