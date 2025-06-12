@@ -37,10 +37,14 @@ class APIClient:
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
     
-    def register(self, username, email, password):
+    def register(self, username, email, password, categories=None):
+        payload = {"username": username, "email": email, "password": password}
+        if categories is not None:
+            payload["categories"] = categories
         response = requests.post(
             f"{self.base_url}/auth/register",
             json={"username": username, "email": email, "password": password}
+            json=payload
         )
         return response
     
@@ -77,10 +81,16 @@ class APIClient:
         )
         return response
     
-    def update_preferences(self, categories, keywords=""):
+    def update_preferences(self, categories, keywords="", share_location=False, share_read_time=False, experimental_opt_in=False):
         response = requests.put(
             f"{self.base_url}/user/preferences",
-            json={"categories": categories, "keywords": keywords},
+            json={
+                "categories": categories,
+                "keywords": keywords,
+                "share_location": share_location,
+                "share_read_time": share_read_time,
+                "experimental_opt_in": experimental_opt_in
+            },
             headers=self.get_headers()
         )
         return response
@@ -95,6 +105,20 @@ class APIClient:
     def get_saved_articles(self):
         response = requests.get(
             f"{self.base_url}/user/saved-articles",
+            headers=self.get_headers()
+        )
+        return response
+
+    def get_personalized_news(self):
+        response = requests.get(
+            f"{self.base_url}/news/personalized",
+            headers=self.get_headers()
+        )
+        return response
+
+    def get_explore_news(self, limit=10):
+        response = requests.get(
+            f"{self.base_url}/news/explore?limit={limit}",
             headers=self.get_headers()
         )
         return response
@@ -143,6 +167,22 @@ def create_register_layout():
                         dbc.Input(id="register-email", placeholder="Email", type="email", className="mb-3"),
                         dbc.Input(id="register-password", placeholder="Password", type="password", className="mb-3"),
                         dbc.Input(id="register-confirm-password", placeholder="Confirm Password", type="password", className="mb-3"),
+                        html.H6("Select Topics of Interest"),
+                        dbc.Checklist(
+                            id="register-categories",
+                            options=[
+                                {"label": "Business", "value": "business"},
+                                {"label": "Entertainment", "value": "entertainment"},
+                                {"label": "General", "value": "general"},
+                                {"label": "Health", "value": "health"},
+                                {"label": "Science", "value": "science"},
+                                {"label": "Sports", "value": "sports"},
+                                {"label": "Technology", "value": "technology"}
+                            ],
+                            value=["general"],
+                            inline=True,
+                            className="mb-3"
+                        ),
                         dbc.Button("Register", id="register-button", color="primary", className="mt-2 w-100"),
                         html.Div(id="register-error", className="text-danger mt-3"),
                         html.Div(id="register-success", className="text-success mt-3"),
@@ -188,6 +228,18 @@ def create_news_feed_layout():
                         html.Hr(),
                         html.H6("Search"),
                         dbc.Input(id="search-keywords", placeholder="Search keywords", type="text", className="mb-3"),
+                        html.H6("Data Sharing"),
+                        dbc.Checklist(
+                            id="data-consent-toggle",
+                            options=[
+                                {"label": "Share Location", "value": "location"},
+                                {"label": "Share Reading Time", "value": "read_time"}
+                                ,{"label": "Explore New Content", "value": "experimental"}
+                            ],
+                            value=[],
+                            switch=True,
+                            className="mb-3"
+                        ),
                         dbc.Button("Apply Filters", id="apply-filters", color="primary", className="w-100"),
                         html.Hr(),
                         html.H6("Save Preferences"),
@@ -228,6 +280,7 @@ def create_news_card(article):
                 html.Small(f"Source: {article['source']} | Category: {article['category'].capitalize()}",
                           className="text-muted")
             ]),
+            html.Small(article.get("explanation", ""), className="text-muted d-block mb-2"),
             dbc.Button("Read More", href=article["url"], target="_blank", color="primary", className="me-2"),
             dbc.Button("Save Article", id={"type": "save-article-btn", "index": article["article_id"]},
                       color="success")
@@ -261,10 +314,11 @@ def display_page(pathname, auth_data):
     [State('register-username', 'value'),
      State('register-email', 'value'),
      State('register-password', 'value'),
-     State('register-confirm-password', 'value')],
+     State('register-confirm-password', 'value'),
+     State('register-categories', 'value')],
     prevent_initial_call=True
 )
-def register_user(n_clicks, username, email, password, confirm_password):
+def register_user(n_clicks, username, email, password, confirm_password, categories):
     if n_clicks is None:
         return "", "", dash.no_update
 
@@ -275,7 +329,7 @@ def register_user(n_clicks, username, email, password, confirm_password):
         return "Passwords do not match.", "", dash.no_update
 
     try:
-        response = api_client.register(username, email, password)
+        response = api_client.register(username, email, password, categories)
         if response.status_code == 200:
             return "", "Registration successful! Please login.", "/login"
         else:
@@ -338,9 +392,7 @@ def load_categories(pathname, auth_data):
         try:
             response = api_client.get_categories()
             if response.status_code == 200:
-                categories = response.json()
-                print('123456789', categories)
-                
+                categories = response.json()                
                 if 'categories' in categories:
                     category_list = categories['categories']
                     return [{'label': cat.title(), 'value': cat} for cat in category_list]
@@ -381,7 +433,10 @@ def update_news_feed(n_clicks, pathname, categories, keywords, auth_data):
         categories = categories or ["general"]
         keywords = keywords or ""
         
-        response = api_client.fetch_news(categories, keywords)
+        if n_clicks is None:
+            response = api_client.get_personalized_news()
+        else:
+            response = api_client.fetch_news(categories, keywords)
         if response.status_code == 200:
             data = response.json()  # This returns {"articles": [...]}
             articles = data.get('articles', [])  # Extract the articles array
@@ -412,14 +467,22 @@ def update_user_welcome(pathname, auth_data):
     [Input('save-preferences', 'n_clicks')],
     [State('category-filter', 'value'),
      State('search-keywords', 'value'),
+     State('data-consent-toggle', 'value'),
      State('auth-store', 'data')],
     prevent_initial_call=True
 )
-def save_user_preferences(n_clicks, categories, keywords, auth_data):
+def save_user_preferences(n_clicks, categories, keywords, data_toggle, auth_data):
     if n_clicks and auth_data and auth_data.get('token'):
         try:
             api_client.set_token(auth_data['token'])
-            response = api_client.update_preferences(categories or [], keywords or "")
+            share_location = 'location' in (data_toggle or [])
+            share_read_time = 'read_time' in (data_toggle or [])
+            response = api_client.update_preferences(
+                categories or [],
+                keywords or "",
+                share_location=share_location,
+                share_read_time=share_read_time
+            )
             if response.status_code == 200:
                 return dbc.Alert("Preferences saved successfully!", color="success", duration=3000)
             else:

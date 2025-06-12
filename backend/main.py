@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
-from typing import List, Optional
+from typing import List, Optional, Dict
 import pymongo
 from pymongo import MongoClient
 import os
@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 from dotenv import load_dotenv
+from .ai_model import analyze_activity
 
 # Load environment variables
 load_dotenv()
@@ -58,6 +59,7 @@ class UserRegister(BaseModel):
     username: str
     email: EmailStr
     password: str
+    categories: Optional[List[str]] = None
 
 class UserLogin(BaseModel):
     username: str
@@ -66,6 +68,9 @@ class UserLogin(BaseModel):
 class UserPreferences(BaseModel):
     categories: List[str]
     keywords: Optional[str] = ""
+    share_location: Optional[bool] = False
+    share_read_time: Optional[bool] = False
+    experimental_opt_in: Optional[bool] = False
 
 class Article(BaseModel):
     article_id: str
@@ -76,6 +81,7 @@ class Article(BaseModel):
     publishedAt: str
     source: str
     category: str
+    explanation: Optional[str] = ""
 
 class NewsFilter(BaseModel):
     categories: Optional[List[str]] = ["general"]
@@ -158,8 +164,11 @@ async def register_user(user: UserRegister):
     # Create default preferences
     default_preferences = {
         "user_id": user_id,
-        "categories": ["general"],
+        "categories": user.categories if user.categories else ["general"],
         "keywords": "",
+        "share_location": False,
+        "share_read_time": False,
+        "experimental_opt_in": False,
         "created_at": datetime.now(),
         "updated_at": datetime.now()
     }
@@ -185,15 +194,6 @@ async def login_user(user: UserLogin):
             "username": user_data["username"],
             "email": user_data["email"]
         }
-    }
-
-@app.get("/api/auth/me")
-async def get_current_user(user_id: str = Depends(verify_token)):
-    user = get_user_by_id(user_id)
-    return {
-        "user_id": user["user_id"],
-        "username": user["username"],
-        "email": user["email"]
     }
 
 # News endpoints
@@ -246,6 +246,7 @@ async def fetch_news(filters: NewsFilter, user_id: str = Depends(verify_token)):
                         "publishedAt": article.get("publishedAt", "") if isinstance(article.get("publishedAt"), str) else "",
                         "source": source_name,
                         "category": category,
+                        "explanation": f"Matched category '{category}'" + (f" and keywords '{filters.keywords}'" if filters.keywords else ""),
                         "created_at": datetime.now()
                     }
                     
@@ -275,6 +276,85 @@ async def get_news_categories():
     categories = ["business", "entertainment", "general", "health", "science", "sports", "technology"]
     return {"categories": categories}
 
+def _fetch_trending_news(limit: int = 10):
+    url = f"https://newsapi.org/v2/top-headlines?country=us&apiKey={NEWS_API_KEY}"
+    news_articles = []
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        news_data = response.json()
+        if news_data.get("status") == "ok" and "articles" in news_data:
+            articles = news_data.get("articles", [])
+            for article in articles[:limit]:
+                if not isinstance(article, dict):
+                    continue
+                article_id = str(uuid.uuid4())
+                source_info = article.get("source", {})
+                source_name = source_info.get("name", "Unknown") if isinstance(source_info, dict) else source_info
+                article_data = {
+                    "article_id": article_id,
+                    "title": article.get("title", "No Title"),
+                    "description": article.get("description", "No Description"),
+                    "url": article.get("url", "#"),
+                    "urlToImage": article.get("urlToImage", ""),
+                    "publishedAt": article.get("publishedAt", ""),
+                    "source": source_name,
+                    "category": "explore",
+                    "explanation": "Trending article",
+                    "created_at": datetime.now()
+                }
+                existing = news_collection.find_one({"title": article_data["title"]})
+                if not existing:
+                    news_collection.insert_one(article_data)
+                else:
+                    article_id = existing["article_id"]
+                    article_data["article_id"] = article_id
+                news_articles.append(article_data)
+    except Exception as e:
+        print(f"Error fetching trending news: {e}")
+    return news_articles
+
+
+@app.get("/api/news/explore")
+async def get_explore_news(limit: int = 10):
+    articles = _fetch_trending_news(limit)
+    return {"articles": articles}
+
+# New endpoint: personalized news feed using simple activity analysis
+@app.get("/api/news/personalized")
+async def get_personalized_news(user_id: str = Depends(verify_token)):
+    # Retrieve user preferences
+    preferences = user_preferences_collection.find_one({"user_id": user_id}) or {
+        "categories": ["general"],
+        "keywords": ""
+    }
+
+    # Gather saved articles for activity analysis
+    user = get_user_by_id(user_id)
+    saved_ids = user.get("saved_articles", []) if isinstance(user, dict) else []
+    saved_articles = []
+    for aid in saved_ids:
+        article = news_collection.find_one({"article_id": aid})
+        if article:
+            saved_articles.append(article)
+
+    # Determine recommended categories
+    rec_categories = analyze_activity(saved_articles, preferences)
+
+    filters = NewsFilter(categories=rec_categories, keywords=preferences.get("keywords", ""), limit=20)
+    result = await fetch_news(filters, user_id)
+    for article in result.get("articles", []):
+        article["explanation"] += " | Recommended based on your activity"
+
+    if preferences.get("experimental_opt_in"):
+        trending = _fetch_trending_news(5)
+        for article in trending:
+            article["explanation"] += " | Explore recommendation"
+        result["articles"].extend(trending)
+
+    return result
+
+
 # User preferences endpoints
 @app.get("/api/user/preferences")
 async def get_user_preferences(user_id: str = Depends(verify_token)):
@@ -285,6 +365,8 @@ async def get_user_preferences(user_id: str = Depends(verify_token)):
             "user_id": user_id,
             "categories": ["general"],
             "keywords": "",
+            "share_location": False,
+            "share_read_time": False,
             "created_at": datetime.now(),
             "updated_at": datetime.now()
         }
@@ -295,6 +377,13 @@ async def get_user_preferences(user_id: str = Depends(verify_token)):
     if "_id" in preferences:
         del preferences["_id"]
     
+     if "share_location" not in preferences:
+        preferences["share_location"] = False
+    if "share_read_time" not in preferences:
+        preferences["share_read_time"] = False
+    if "experimental_opt_in" not in preferences:
+        preferences["experimental_opt_in"] = False
+
     return preferences
 
 @app.put("/api/user/preferences")
@@ -304,6 +393,9 @@ async def update_user_preferences(preferences: UserPreferences, user_id: str = D
         {"$set": {
             "categories": preferences.categories,
             "keywords": preferences.keywords,
+            "share_location": preferences.share_location,
+            "share_read_time": preferences.share_read_time,
+            "experimental_opt_in": preferences.experimental_opt_in,
             "updated_at": datetime.now()
         }},
         upsert=True
