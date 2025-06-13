@@ -114,6 +114,13 @@ class APIClient:
         )
         return response
 
+    def get_liked_articles(self):
+        response = requests.get(
+            f"{self.base_url}/user/liked-articles",
+            headers=self.get_headers()
+        )
+        return response
+
     def get_personalized_news(self):
         response = requests.get(
             f"{self.base_url}/news/personalized",
@@ -288,7 +295,8 @@ def create_news_feed_layout():
         ])
     ], fluid=True)
 
-def create_news_card(article):
+def create_news_card(article, liked=False):
+    like_label = "Liked!" if liked else "Like"
     return dbc.Card([
         dbc.CardImg(
             src=article.get("urlToImage") if article.get("urlToImage") else "https://via.placeholder.com/300x200?text=No+Image",
@@ -305,7 +313,7 @@ def create_news_card(article):
             dbc.Button("Read More", href=article["url"], target="_blank", color="primary", className="me-2"),
             dbc.Button("Save Article", id={"type": "save-article-btn", "index": article["article_id"]},
                       color="success", className="me-2"),
-            dbc.Button("Like", id={"type": "like-article-btn", "index": article["article_id"]},
+            dbc.Button(like_label, id={"type": "like-article-btn", "index": article["article_id"]},
                       color="danger")
         ])
     ], className="mb-4 shadow-sm")
@@ -466,8 +474,15 @@ def update_news_feed(n_clicks, pathname, categories, keywords, locations, auth_d
         if response.status_code == 200:
             data = response.json()  # This returns {"articles": [...]}
             articles = data.get('articles', [])  # Extract the articles array
+            
+            liked_ids = []
+            liked_resp = api_client.get_liked_articles()
+            if liked_resp.status_code == 200:
+                liked_data = liked_resp.json()
+                liked_ids = [a['article_id'] for a in liked_data.get('liked_articles', [])]
+
             if articles:
-                return [create_news_card(article) for article in articles]
+                return [create_news_card(article, liked=article['article_id'] in liked_ids) for article in articles]
             else:
                 return [html.Div("No articles found.", className="text-center text-muted")]
         else:

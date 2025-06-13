@@ -4,6 +4,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional
+from apscheduler.schedulers.background import BackgroundScheduler
 from bson import ObjectId
 import re
 from pymongo import MongoClient
@@ -15,13 +16,35 @@ from datetime import datetime, timedelta, timezone
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 from dotenv import load_dotenv
-from ai_model import analyze_activity
+from ai_model import analyze_activity, rank_articles, extract_keywords
 
 # Load environment variables
 load_dotenv()
 
 # Initialize FastAPI
 app = FastAPI(title="News Feed API", version="1.0.0")
+
+# Scheduler for periodic news updates
+scheduler = BackgroundScheduler()
+
+
+def scheduled_news_fetch():
+    """Fetch trending news articles on a schedule."""
+    try:
+        _fetch_trending_news()
+    except Exception as e:
+        print(f"Scheduled news fetch failed: {e}")
+
+
+@app.on_event("startup")
+def start_scheduler():
+    scheduler.add_job(scheduled_news_fetch, "interval", minutes=2)
+    scheduler.start()
+
+
+@app.on_event("shutdown")
+def shutdown_scheduler():
+    scheduler.shutdown()
 
 # CORS middleware
 app.add_middleware(
@@ -89,12 +112,8 @@ class NewsFilter(BaseModel):
     categories: Optional[List[str]] = ["general"]
     keywords: Optional[str] = ""
     locations: Optional[List[str]] = None
-    limit: Optional[int] = 20
+    limit: Optional[int] = 50
 
-# Helper functions
-def sanitize_word(word: str) -> str:
-    """Sanitize a word so it can be safely used as a MongoDB field name."""
-    return re.sub(r"[^a-z0-9_]", "", word.lower())
 
 def create_access_token(data: dict):
     to_encode = data.copy()
@@ -369,56 +388,14 @@ async def get_personalized_news(user_id: str = Depends(verify_token)):
 
     # Determine recommended categories
     rec_data = analyze_activity(liked_articles, preferences)
-    rec_categories = rec_data["categories"]
     rec_locations = rec_data["locations"]
 
-    filters = NewsFilter(
-        categories=rec_categories,
-        keywords=preferences.get("keywords", ""),
-        locations=rec_locations,
-        limit=20,
-    )
+    filters = NewsFilter(limit=50)
     result = await fetch_news(filters, user_id)
     user_profile = user.get("interest_profile", {"categories": {}, "sources": {}, "keywords": {}})
-    cat_scores = user_profile.get("categories", {})
-    src_scores = user_profile.get("sources", {})
-    kw_scores = user_profile.get("keywords", {})
 
     articles = result.get("articles", [])
-    for article in articles:
-        article["explanation"] += " | Recommended based on your activity"
-        if rec_locations:
-            article["explanation"] += f" | Locations: {', '.join(rec_locations)}"
-
-        score = 0
-        cat = article.get("category")
-        src = article.get("source")
-        text = f"{article.get('title', '')} {article.get('description', '')}".lower()
-        if cat:
-            score += cat_scores.get(cat, 0)
-        if src:
-            score += src_scores.get(src, 0)
-        for word in text.split():
-            score += kw_scores.get(word, 0)
-        article["_score"] = score
-
-    articles.sort(key=lambda a: a.get("_score", 0), reverse=True)
-    for article in articles:
-        article.pop("_score", None)
-        explanations = []
-        cat = article.get("category")
-        src = article.get("source")
-        if cat and cat in cat_scores:
-            explanations.append(f"Category match ({cat_scores[cat]})")
-        if src and src in src_scores:
-            explanations.append(f"Source match ({src_scores[src]})")
-        text = f"{article.get('title', '')} {article.get('description', '')}".lower()
-        for word in text.split():
-            if word in kw_scores:
-                explanations.append(f"Keyword match ({word})")
-                break
-        if explanations:
-            article["explanation"] += " | " + ", ".join(explanations)
+    articles = rank_articles(articles, user_profile, rec_locations)
 
     if preferences.get("experimental_opt_in"):
         trending = _fetch_trending_news(5)
@@ -505,13 +482,15 @@ async def like_article(article_id: str, user_id: str = Depends(verify_token)):
     inc_fields = {}
     category = article.get("category")
     source = article.get("source")
-    text = f"{article.get('title', '')} {article.get('description', '')}".lower()
+    text = f"{article.get('title', '')} {article.get('description', '')}"
     if category:
         inc_fields[f"interest_profile.categories.{category}"] = 1
     if source:
         inc_fields[f"interest_profile.sources.{source}"] = 1
-    for word in set(text.split()):
-        inc_fields[f"interest_profile.keywords.{word}"] = inc_fields.get(f"interest_profile.keywords.{word}", 0) + 1
+    for word in set(extract_keywords(text)):
+        inc_fields[f"interest_profile.keywords.{word}"] = inc_fields.get(
+            f"interest_profile.keywords.{word}", 0
+        ) + 1
     if inc_fields:
         update_doc["$inc"] = inc_fields
 
