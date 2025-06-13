@@ -1,10 +1,11 @@
 # backend/main.py
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
-from typing import List, Optional, Dict
-import pymongo
+from typing import List, Optional
+from bson import ObjectId
+import re
 from pymongo import MongoClient
 import os
 import requests
@@ -91,6 +92,10 @@ class NewsFilter(BaseModel):
     limit: Optional[int] = 20
 
 # Helper functions
+def sanitize_word(word: str) -> str:
+    """Sanitize a word so it can be safely used as a MongoDB field name."""
+    return re.sub(r"[^a-z0-9_]", "", word.lower())
+
 def create_access_token(data: dict):
     to_encode = data.copy()
     # Fix: Use timezone-aware datetime
@@ -115,6 +120,21 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     except Exception as e:
         print(f"Unexpected error in verify_token: {e}")
         raise HTTPException(status_code=401, detail="Token verification failed")
+
+def _convert_object_ids(data):
+    """Recursively convert MongoDB types to JSON-serializable values."""
+    if isinstance(data, list):
+        return [_convert_object_ids(item) for item in data]
+    if isinstance(data, dict):
+        result = {}
+        for key, value in data.items():
+            if key == "_id":
+                continue
+            result[key] = _convert_object_ids(value)
+        return result
+    if isinstance(data, (ObjectId, datetime)):
+        return str(data)
+    return data
 
 def get_user_by_id(user_id: str):
     print(f"Looking up user by ID: {user_id}")
@@ -159,7 +179,8 @@ async def register_user(user: UserRegister):
         "password": generate_password_hash(user.password),
         "created_at": datetime.now(),
         "saved_articles": [],
-        "liked_articles": []
+        "liked_articles": [],
+        "interest_profile": {"categories": {}, "sources": {}, "keywords": {}}
     }
     
     users_collection.insert_one(new_user)
@@ -177,7 +198,7 @@ async def register_user(user: UserRegister):
     }
     user_preferences_collection.insert_one(default_preferences)
     
-    return {"message": "User registered successfully", "user_id": user_id}
+    return _convert_object_ids({"message": "User registered successfully", "user_id": user_id})
 
 @app.post("/api/auth/login")
 async def login_user(user: UserLogin):
@@ -189,7 +210,7 @@ async def login_user(user: UserLogin):
     # Create access token
     access_token = create_access_token(data={"sub": user_data["user_id"]})
     
-    return {
+    return _convert_object_ids({
         "access_token": access_token,
         "token_type": "bearer",
         "user": {
@@ -197,7 +218,7 @@ async def login_user(user: UserLogin):
             "username": user_data["username"],
             "email": user_data["email"]
         }
-    }
+    })
 
 # News endpoints
 @app.post("/api/news/fetch")
@@ -277,7 +298,7 @@ async def fetch_news(filters: NewsFilter, user_id: str = Depends(verify_token)):
             print(f"Error fetching news for category {category}: {str(e)}")
             continue
     
-    return {"articles": news_articles}
+    return _convert_object_ids({"articles": news_articles})
 
 @app.get("/api/news/categories")
 async def get_news_categories():
@@ -326,7 +347,7 @@ def _fetch_trending_news(limit: int = 10):
 @app.get("/api/news/explore")
 async def get_explore_news(limit: int = 10):
     articles = _fetch_trending_news(limit)
-    return {"articles": articles}
+    return _convert_object_ids({"articles": articles})
 
 # New endpoint: personalized news feed using simple activity analysis
 @app.get("/api/news/personalized")
@@ -358,17 +379,55 @@ async def get_personalized_news(user_id: str = Depends(verify_token)):
         limit=20,
     )
     result = await fetch_news(filters, user_id)
-    for article in result.get("articles", []):
+    user_profile = user.get("interest_profile", {"categories": {}, "sources": {}, "keywords": {}})
+    cat_scores = user_profile.get("categories", {})
+    src_scores = user_profile.get("sources", {})
+    kw_scores = user_profile.get("keywords", {})
+
+    articles = result.get("articles", [])
+    for article in articles:
         article["explanation"] += " | Recommended based on your activity"
         if rec_locations:
             article["explanation"] += f" | Locations: {', '.join(rec_locations)}"
+
+        score = 0
+        cat = article.get("category")
+        src = article.get("source")
+        text = f"{article.get('title', '')} {article.get('description', '')}".lower()
+        if cat:
+            score += cat_scores.get(cat, 0)
+        if src:
+            score += src_scores.get(src, 0)
+        for word in text.split():
+            score += kw_scores.get(word, 0)
+        article["_score"] = score
+
+    articles.sort(key=lambda a: a.get("_score", 0), reverse=True)
+    for article in articles:
+        article.pop("_score", None)
+        explanations = []
+        cat = article.get("category")
+        src = article.get("source")
+        if cat and cat in cat_scores:
+            explanations.append(f"Category match ({cat_scores[cat]})")
+        if src and src in src_scores:
+            explanations.append(f"Source match ({src_scores[src]})")
+        text = f"{article.get('title', '')} {article.get('description', '')}".lower()
+        for word in text.split():
+            if word in kw_scores:
+                explanations.append(f"Keyword match ({word})")
+                break
+        if explanations:
+            article["explanation"] += " | " + ", ".join(explanations)
 
     if preferences.get("experimental_opt_in"):
         trending = _fetch_trending_news(5)
         for article in trending:
             article["explanation"] += " | Explore recommendation"
-        result["articles"].extend(trending)
+            article["_score"] = 0
+        articles.extend(trending)
 
+    result["articles"] = articles
     return result
 
 
@@ -388,7 +447,7 @@ async def get_user_preferences(user_id: str = Depends(verify_token)):
             "updated_at": datetime.now()
         }
         user_preferences_collection.insert_one(default_preferences)
-        return default_preferences
+        return _convert_object_ids(default_preferences)
     
     # Remove MongoDB's _id field for JSON serialization
     if "_id" in preferences:
@@ -401,7 +460,7 @@ async def get_user_preferences(user_id: str = Depends(verify_token)):
     if "experimental_opt_in" not in preferences:
         preferences["experimental_opt_in"] = False
 
-    return preferences
+    return _convert_object_ids(preferences)
 
 @app.put("/api/user/preferences")
 async def update_user_preferences(preferences: UserPreferences, user_id: str = Depends(verify_token)):
@@ -417,7 +476,7 @@ async def update_user_preferences(preferences: UserPreferences, user_id: str = D
         }},
         upsert=True
     )
-    return {"message": "Preferences updated successfully"}
+    return _convert_object_ids({"message": "Preferences updated successfully"})
 
 # Saved articles endpoints
 @app.post("/api/user/save-article/{article_id}")
@@ -433,20 +492,31 @@ async def save_article(article_id: str, user_id: str = Depends(verify_token)):
         {"$addToSet": {"saved_articles": article_id}}
     )
     
-    return {"message": "Article saved successfully"}
+    return _convert_object_ids({"message": "Article saved successfully"})
 
-    # Like articles endpoints
+# Like articles endpoints
 @app.post("/api/user/like-article/{article_id}")
 async def like_article(article_id: str, user_id: str = Depends(verify_token)):
     article = news_collection.find_one({"article_id": article_id})
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
 
-    users_collection.update_one(
-        {"user_id": user_id},
-        {"$addToSet": {"liked_articles": article_id}}
-    )
-    return {"message": "Article liked"}
+    update_doc = {"$addToSet": {"liked_articles": article_id}}
+    inc_fields = {}
+    category = article.get("category")
+    source = article.get("source")
+    text = f"{article.get('title', '')} {article.get('description', '')}".lower()
+    if category:
+        inc_fields[f"interest_profile.categories.{category}"] = 1
+    if source:
+        inc_fields[f"interest_profile.sources.{source}"] = 1
+    for word in set(text.split()):
+        inc_fields[f"interest_profile.keywords.{word}"] = inc_fields.get(f"interest_profile.keywords.{word}", 0) + 1
+    if inc_fields:
+        update_doc["$inc"] = inc_fields
+
+    users_collection.update_one({"user_id": user_id}, update_doc)
+    return _convert_object_ids({"message": "Article liked"})
 
 @app.get("/api/user/liked-articles")
 async def get_liked_articles(user_id: str = Depends(verify_token)):
@@ -459,7 +529,7 @@ async def get_liked_articles(user_id: str = Depends(verify_token)):
             if "_id" in article:
                 del article["_id"]
             liked_articles.append(article)
-    return {"liked_articles": liked_articles}
+    return _convert_object_ids({"liked_articles": liked_articles})
 
 
 @app.get("/api/user/saved-articles")
@@ -474,7 +544,7 @@ async def get_saved_articles(user_id: str = Depends(verify_token)):
         # Ensure user is a dictionary
         if not isinstance(user, dict):
             print(f"ERROR: User is not a dictionary: {type(user)}")
-            return {"saved_articles": []}
+            return _convert_object_ids({"saved_articles": []})
         
         saved_article_ids = user.get("saved_articles", [])
         print(f"Saved article IDs: {saved_article_ids}, type: {type(saved_article_ids)}")
@@ -496,11 +566,11 @@ async def get_saved_articles(user_id: str = Depends(verify_token)):
                 print(f"Added article: {article.get('title', 'No title')}")
         
         print(f"Returning {len(saved_articles)} saved articles")
-        return {"saved_articles": saved_articles}
+        return _convert_object_ids({"saved_articles": saved_articles})
         
     except Exception as e:
         print(f"Error in get_saved_articles: {e}")
-        return {"saved_articles": [], "error": str(e)}
+        return _convert_object_ids({"saved_articles": [], "error": str(e)})
 
 @app.delete("/api/user/saved-articles/{article_id}")
 async def remove_saved_article(article_id: str, user_id: str = Depends(verify_token)):
@@ -508,12 +578,12 @@ async def remove_saved_article(article_id: str, user_id: str = Depends(verify_to
         {"user_id": user_id},
         {"$pull": {"saved_articles": article_id}}
     )
-    return {"message": "Article removed from saved"}
+    return _convert_object_ids({"message": "Article removed from saved"})
 
 # Health check
 @app.get("/api/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": datetime.now()}
+    return _convert_object_ids({"status": "healthy", "timestamp": datetime.now()})
 
 if __name__ == "__main__":
     import uvicorn

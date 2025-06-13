@@ -2,10 +2,8 @@
 import dash
 from dash import dcc, html, Input, Output, State, callback_context
 import dash_bootstrap_components as dbc
-from dash.exceptions import PreventUpdate
 import requests
 import json
-from datetime import datetime
 import os
 from dotenv import load_dotenv
 
@@ -129,6 +127,13 @@ class APIClient:
             headers=self.get_headers()
         )
         return response
+
+def format_error_detail(error_data, default_msg):
+    """Normalize error details from the backend."""
+    detail = error_data.get("detail", default_msg)
+    if isinstance(detail, list):
+        detail = "; ".join(item.get("msg", str(item)) for item in detail)
+    return detail
 
 # Initialize API client
 api_client = APIClient(API_BASE_URL)
@@ -352,7 +357,8 @@ def register_user(n_clicks, username, email, password, confirm_password, categor
             return "", "Registration successful! Please login.", "/login"
         else:
             error_data = response.json()
-            return error_data.get("detail", "Registration failed"), "", dash.no_update
+            detail = format_error_detail(error_data, "Registration failed")
+            return detail, "", dash.no_update
     except Exception as e:
         return f"Connection error: {str(e)}", "", dash.no_update
 
@@ -384,7 +390,8 @@ def login_user(n_clicks, username, password):
             return "", "/news-feed", auth_data
         else:
             error_data = response.json()
-            return error_data.get("detail", "Login failed"), dash.no_update, dash.no_update
+            detail = format_error_detail(error_data, "Login failed")
+            return detail, dash.no_update, dash.no_update
     except Exception as e:
         return f"Connection error: {str(e)}", dash.no_update, dash.no_update
 
