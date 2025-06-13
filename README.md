@@ -27,13 +27,6 @@ python app.py
 Open your browser and navigate to:
 http://127.0.0.1:8050/
 
-
-Login Credentials
-For testing purposes, the application comes with two test users:
-
-Username: vishnu, Password: 1234
-Username: ayush, Password: 5678
-
 Features
 
 User authentication with MongoDB
