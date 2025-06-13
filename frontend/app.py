@@ -43,7 +43,6 @@ class APIClient:
             payload["categories"] = categories
         response = requests.post(
             f"{self.base_url}/auth/register",
-            json={"username": username, "email": email, "password": password}
             json=payload
         )
         return response
@@ -62,10 +61,10 @@ class APIClient:
         )
         return response
     
-    def fetch_news(self, categories, keywords="", limit=20):
+    def fetch_news(self, categories, keywords="", locations=None, limit=20):
         response = requests.post(
             f"{self.base_url}/news/fetch",
-            json={"categories": categories, "keywords": keywords, "limit": limit},
+            json={"categories": categories, "keywords": keywords, "locations": locations, "limit": limit},
             headers=self.get_headers()
         )
         return response
@@ -81,13 +80,13 @@ class APIClient:
         )
         return response
     
-    def update_preferences(self, categories, keywords="", share_location=False, share_read_time=False, experimental_opt_in=False):
+    def update_preferences(self, categories, keywords="", locations=None, share_read_time=False, experimental_opt_in=False):
         response = requests.put(
             f"{self.base_url}/user/preferences",
             json={
                 "categories": categories,
                 "keywords": keywords,
-                "share_location": share_location,
+                "locations": locations or [],
                 "share_read_time": share_read_time,
                 "experimental_opt_in": experimental_opt_in
             },
@@ -98,6 +97,14 @@ class APIClient:
     def save_article(self, article_id):
         response = requests.post(
             f"{self.base_url}/user/save-article/{article_id}",
+            headers=self.get_headers()
+        )
+        return response
+
+    
+    def like_article(self, article_id):
+        response = requests.post(
+            f"{self.base_url}/user/like-article/{article_id}",
             headers=self.get_headers()
         )
         return response
@@ -228,13 +235,22 @@ def create_news_feed_layout():
                         html.Hr(),
                         html.H6("Search"),
                         dbc.Input(id="search-keywords", placeholder="Search keywords", type="text", className="mb-3"),
+                        html.H6("Preferred Locations"),
+                        dbc.Checklist(
+                            id="location-preferences",
+                            options=[
+                                {"label": loc, "value": loc} for loc in ["USA", "China", "India", "Russia", "UK"]
+                            ],
+                            value=[],
+                            inline=True,
+                            className="mb-3"
+                        ),
                         html.H6("Data Sharing"),
                         dbc.Checklist(
                             id="data-consent-toggle",
                             options=[
-                                {"label": "Share Location", "value": "location"},
-                                {"label": "Share Reading Time", "value": "read_time"}
-                                ,{"label": "Explore New Content", "value": "experimental"}
+                                {"label": "Share Reading Time", "value": "read_time"},
+                                {"label": "Explore New Content", "value": "experimental"}
                             ],
                             value=[],
                             switch=True,
@@ -283,7 +299,9 @@ def create_news_card(article):
             html.Small(article.get("explanation", ""), className="text-muted d-block mb-2"),
             dbc.Button("Read More", href=article["url"], target="_blank", color="primary", className="me-2"),
             dbc.Button("Save Article", id={"type": "save-article-btn", "index": article["article_id"]},
-                      color="success")
+                      color="success", className="me-2"),
+            dbc.Button("Like", id={"type": "like-article-btn", "index": article["article_id"]},
+                      color="danger")
         ])
     ], className="mb-4 shadow-sm")
 
@@ -421,10 +439,11 @@ def load_categories(pathname, auth_data):
      Input('url', 'pathname')],
     [State('category-filter', 'value'),
      State('search-keywords', 'value'),
+     State('location-preferences', 'value'),
      State('auth-store', 'data')],
     prevent_initial_call=False
 )
-def update_news_feed(n_clicks, pathname, categories, keywords, auth_data):
+def update_news_feed(n_clicks, pathname, categories, keywords, locations, auth_data):
     if pathname != '/news-feed' or not auth_data or not auth_data.get('token'):
         return []
 
@@ -436,7 +455,7 @@ def update_news_feed(n_clicks, pathname, categories, keywords, auth_data):
         if n_clicks is None:
             response = api_client.get_personalized_news()
         else:
-            response = api_client.fetch_news(categories, keywords)
+            response = api_client.fetch_news(categories, keywords, locations or [])
         if response.status_code == 200:
             data = response.json()  # This returns {"articles": [...]}
             articles = data.get('articles', [])  # Extract the articles array
@@ -467,21 +486,22 @@ def update_user_welcome(pathname, auth_data):
     [Input('save-preferences', 'n_clicks')],
     [State('category-filter', 'value'),
      State('search-keywords', 'value'),
+     State('location-preferences', 'value'),
      State('data-consent-toggle', 'value'),
      State('auth-store', 'data')],
     prevent_initial_call=True
 )
-def save_user_preferences(n_clicks, categories, keywords, data_toggle, auth_data):
+def save_user_preferences(n_clicks, categories, keywords, locations, data_toggle, auth_data):
     if n_clicks and auth_data and auth_data.get('token'):
         try:
             api_client.set_token(auth_data['token'])
-            share_location = 'location' in (data_toggle or [])
             share_read_time = 'read_time' in (data_toggle or [])
             response = api_client.update_preferences(
                 categories or [],
                 keywords or "",
-                share_location=share_location,
-                share_read_time=share_read_time
+                locations or [],
+                share_read_time=share_read_time,
+                experimental_opt_in='experimental' in (data_toggle or [])
             )
             if response.status_code == 200:
                 return dbc.Alert("Preferences saved successfully!", color="success", duration=3000)
@@ -548,6 +568,29 @@ def save_article(n_clicks, auth_data):
         except Exception as e:
             return "Error"
     return "Save Article"
+
+@app.callback(
+    Output({'type': 'like-article-btn', 'index': dash.dependencies.MATCH}, 'children'),
+    [Input({'type': 'like-article-btn', 'index': dash.dependencies.MATCH}, 'n_clicks')],
+    [State('auth-store', 'data')],
+    prevent_initial_call=True
+)
+def like_article(n_clicks, auth_data):
+    if n_clicks and auth_data and auth_data.get('token'):
+        try:
+            ctx = callback_context
+            if ctx.triggered:
+                button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+                article_id = json.loads(button_id)['index']
+                api_client.set_token(auth_data['token'])
+                response = api_client.like_article(article_id)
+                if response.status_code == 200:
+                    return "Liked!"
+                else:
+                    return "Like Failed"
+        except Exception:
+            return "Error"
+    return "Like"
 
 if __name__ == '__main__':
     app.run(debug=True, port=8050)

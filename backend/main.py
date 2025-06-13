@@ -9,11 +9,12 @@ from pymongo import MongoClient
 import os
 import requests
 import uuid
+from urllib.parse import quote_plus
 from datetime import datetime, timedelta, timezone
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 from dotenv import load_dotenv
-from .ai_model import analyze_activity
+from ai_model import analyze_activity
 
 # Load environment variables
 load_dotenv()
@@ -68,7 +69,7 @@ class UserLogin(BaseModel):
 class UserPreferences(BaseModel):
     categories: List[str]
     keywords: Optional[str] = ""
-    share_location: Optional[bool] = False
+    locations: Optional[List[str]] = []
     share_read_time: Optional[bool] = False
     experimental_opt_in: Optional[bool] = False
 
@@ -86,6 +87,7 @@ class Article(BaseModel):
 class NewsFilter(BaseModel):
     categories: Optional[List[str]] = ["general"]
     keywords: Optional[str] = ""
+    locations: Optional[List[str]] = None
     limit: Optional[int] = 20
 
 # Helper functions
@@ -156,7 +158,8 @@ async def register_user(user: UserRegister):
         "email": user.email,
         "password": generate_password_hash(user.password),
         "created_at": datetime.now(),
-        "saved_articles": []
+        "saved_articles": [],
+        "liked_articles": []
     }
     
     users_collection.insert_one(new_user)
@@ -166,7 +169,7 @@ async def register_user(user: UserRegister):
         "user_id": user_id,
         "categories": user.categories if user.categories else ["general"],
         "keywords": "",
-        "share_location": False,
+        "locations": [],
         "share_read_time": False,
         "experimental_opt_in": False,
         "created_at": datetime.now(),
@@ -204,8 +207,13 @@ async def fetch_news(filters: NewsFilter, user_id: str = Depends(verify_token)):
     for category in filters.categories:
         url = f"https://newsapi.org/v2/top-headlines?category={category}&apiKey={NEWS_API_KEY}"
         
+        query_parts = []
         if filters.keywords:
-            url += f"&q={filters.keywords}"
+            query_parts.append(filters.keywords)
+        if filters.locations:
+            query_parts.append(" OR ".join(filters.locations))
+        if query_parts:
+            url += "&q=" + quote_plus(" ".join(query_parts))
         
         try:
             response = requests.get(url)
@@ -331,20 +339,29 @@ async def get_personalized_news(user_id: str = Depends(verify_token)):
 
     # Gather saved articles for activity analysis
     user = get_user_by_id(user_id)
-    saved_ids = user.get("saved_articles", []) if isinstance(user, dict) else []
-    saved_articles = []
-    for aid in saved_ids:
+    liked_ids = user.get("liked_articles", []) if isinstance(user, dict) else []
+    liked_articles = []
+    for aid in liked_ids:
         article = news_collection.find_one({"article_id": aid})
         if article:
-            saved_articles.append(article)
+            liked_articles.append(article)
 
     # Determine recommended categories
-    rec_categories = analyze_activity(saved_articles, preferences)
+    rec_data = analyze_activity(liked_articles, preferences)
+    rec_categories = rec_data["categories"]
+    rec_locations = rec_data["locations"]
 
-    filters = NewsFilter(categories=rec_categories, keywords=preferences.get("keywords", ""), limit=20)
+    filters = NewsFilter(
+        categories=rec_categories,
+        keywords=preferences.get("keywords", ""),
+        locations=rec_locations,
+        limit=20,
+    )
     result = await fetch_news(filters, user_id)
     for article in result.get("articles", []):
         article["explanation"] += " | Recommended based on your activity"
+        if rec_locations:
+            article["explanation"] += f" | Locations: {', '.join(rec_locations)}"
 
     if preferences.get("experimental_opt_in"):
         trending = _fetch_trending_news(5)
@@ -365,7 +382,7 @@ async def get_user_preferences(user_id: str = Depends(verify_token)):
             "user_id": user_id,
             "categories": ["general"],
             "keywords": "",
-            "share_location": False,
+            "locations": [],
             "share_read_time": False,
             "created_at": datetime.now(),
             "updated_at": datetime.now()
@@ -377,8 +394,8 @@ async def get_user_preferences(user_id: str = Depends(verify_token)):
     if "_id" in preferences:
         del preferences["_id"]
     
-     if "share_location" not in preferences:
-        preferences["share_location"] = False
+    if "locations" not in preferences:
+        preferences["locations"] = []
     if "share_read_time" not in preferences:
         preferences["share_read_time"] = False
     if "experimental_opt_in" not in preferences:
@@ -393,7 +410,7 @@ async def update_user_preferences(preferences: UserPreferences, user_id: str = D
         {"$set": {
             "categories": preferences.categories,
             "keywords": preferences.keywords,
-            "share_location": preferences.share_location,
+            "locations": preferences.locations,
             "share_read_time": preferences.share_read_time,
             "experimental_opt_in": preferences.experimental_opt_in,
             "updated_at": datetime.now()
@@ -417,6 +434,33 @@ async def save_article(article_id: str, user_id: str = Depends(verify_token)):
     )
     
     return {"message": "Article saved successfully"}
+
+    # Like articles endpoints
+@app.post("/api/user/like-article/{article_id}")
+async def like_article(article_id: str, user_id: str = Depends(verify_token)):
+    article = news_collection.find_one({"article_id": article_id})
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    users_collection.update_one(
+        {"user_id": user_id},
+        {"$addToSet": {"liked_articles": article_id}}
+    )
+    return {"message": "Article liked"}
+
+@app.get("/api/user/liked-articles")
+async def get_liked_articles(user_id: str = Depends(verify_token)):
+    user = get_user_by_id(user_id)
+    liked_ids = user.get("liked_articles", []) if isinstance(user, dict) else []
+    liked_articles = []
+    for aid in liked_ids:
+        article = news_collection.find_one({"article_id": aid})
+        if article:
+            if "_id" in article:
+                del article["_id"]
+            liked_articles.append(article)
+    return {"liked_articles": liked_articles}
+
 
 @app.get("/api/user/saved-articles")
 async def get_saved_articles(user_id: str = Depends(verify_token)):
