@@ -66,8 +66,8 @@ try:
 except Exception as e:
     print(f"MongoDB connection error: {e}")
 
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "758c48dbb96c4f96b40fd091e07070ac")
-SECRET_KEY = os.getenv("SECRET_KEY", "vishnu16")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "862309ce6bc0435383c01db4ed148b11")
+SECRET_KEY = os.getenv("SECRET_KEY", "Mahant@226")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -229,7 +229,13 @@ async def login_user(user: UserLogin):
 async def fetch_news(filters: NewsFilter, user_id: str = Depends(verify_token)):
     news_articles = []
     
-    for category in filters.categories:
+    all_categories = ["business", "entertainment", "general", "health", "science", "sports", "technology"]
+
+    categories_to_fetch = filters.categories or ["general"]
+    if "general" in categories_to_fetch and len(categories_to_fetch) == 1:
+        categories_to_fetch = all_categories
+
+    for category in categories_to_fetch:
         url = f"https://newsapi.org/v2/top-headlines?category={category}&apiKey={NEWS_API_KEY}"
         
         query_parts = []
@@ -253,7 +259,7 @@ async def fetch_news(filters: NewsFilter, user_id: str = Depends(verify_token)):
                 if not isinstance(articles, list):
                     continue
                     
-                for article in articles[:filters.limit//len(filters.categories)]:
+                for article in articles[:filters.limit//len(categories_to_fetch)]:
                     if not isinstance(article, dict):
                         continue
                         
@@ -358,14 +364,9 @@ async def get_personalized_news(user_id: str = Depends(verify_token)):
     }
 
     user = get_user_by_id(user_id)
-    liked_ids = user.get("liked_articles", []) if isinstance(user, dict) else []
-    liked_articles = []
-    for aid in liked_ids:
-        article = news_collection.find_one({"article_id": aid})
-        if article:
-            liked_articles.append(article)
+    user_profile = user.get("interest_profile", {"categories": {}, "sources": {}, "keywords": {}})
 
-    rec_data = analyze_activity(liked_articles, preferences)
+    rec_data = analyze_activity(user_profile, preferences)
     rec_categories = rec_data["categories"] or ["general"]
     rec_locations = rec_data["locations"]
 
@@ -376,7 +377,7 @@ async def get_personalized_news(user_id: str = Depends(verify_token)):
         limit=20,
     )
     result = await fetch_news(filters, user_id)
-    user_profile = user.get("interest_profile", {"categories": {}, "sources": {}, "keywords": {}})
+    user_profile = user_profile
 
     articles = result.get("articles", [])
     articles = rank_articles(articles, user_profile, rec_locations)
@@ -436,6 +437,22 @@ async def update_user_preferences(preferences: UserPreferences, user_id: str = D
     )
     return _convert_object_ids({"message": "Preferences updated successfully"})
 
+def _increment_interest_profile(user_id: str, article: dict):
+    """Increase a user's interest profile counts based on an article."""
+    inc_fields = {}
+    category = article.get("category")
+    source = article.get("source")
+    text = f"{article.get('title', '')} {article.get('description', '')}"
+    if category:
+        inc_fields[f"interest_profile.categories.{category}"] = 1
+    if source:
+        inc_fields[f"interest_profile.sources.{source}"] = 1
+    for word in set(extract_keywords(text)):
+        field = f"interest_profile.keywords.{word}"
+        inc_fields[field] = inc_fields.get(field, 0) + 1
+    if inc_fields:
+        users_collection.update_one({"user_id": user_id}, {"$inc": inc_fields})
+
 @app.post("/api/user/save-article/{article_id}")
 async def save_article(article_id: str, user_id: str = Depends(verify_token)):
     article = news_collection.find_one({"article_id": article_id})
@@ -446,7 +463,7 @@ async def save_article(article_id: str, user_id: str = Depends(verify_token)):
         {"user_id": user_id},
         {"$addToSet": {"saved_articles": article_id}}
     )
-    
+    _increment_interest_profile(user_id, article)
     return _convert_object_ids({"message": "Article saved successfully"})
 
 # Like articles endpoints
@@ -456,24 +473,22 @@ async def like_article(article_id: str, user_id: str = Depends(verify_token)):
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
 
-    update_doc = {"$addToSet": {"liked_articles": article_id}}
-    inc_fields = {}
-    category = article.get("category")
-    source = article.get("source")
-    text = f"{article.get('title', '')} {article.get('description', '')}"
-    if category:
-        inc_fields[f"interest_profile.categories.{category}"] = 1
-    if source:
-        inc_fields[f"interest_profile.sources.{source}"] = 1
-    for word in set(extract_keywords(text)):
-        inc_fields[f"interest_profile.keywords.{word}"] = inc_fields.get(
-            f"interest_profile.keywords.{word}", 0
-        ) + 1
-    if inc_fields:
-        update_doc["$inc"] = inc_fields
+    users_collection.update_one(
+        {"user_id": user_id}, {"$addToSet": {"liked_articles": article_id}}
+    )
 
-    users_collection.update_one({"user_id": user_id}, update_doc)
+    _increment_interest_profile(user_id, article)
     return _convert_object_ids({"message": "Article liked"})
+
+@app.post("/api/user/read-article/{article_id}")
+async def read_article(article_id: str, user_id: str = Depends(verify_token)):
+    """Record that a user read an article to improve recommendations."""
+    article = news_collection.find_one({"article_id": article_id})
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    _increment_interest_profile(user_id, article)
+    return _convert_object_ids({"message": "Article read"})
 
 @app.get("/api/user/liked-articles")
 async def get_liked_articles(user_id: str = Depends(verify_token)):

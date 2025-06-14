@@ -34,6 +34,10 @@ News feed from News API
 Category-based news browsing
 Responsive design with custom CSS
 
+Selecting the "general" category in the preferences will display news from all
+available categories. The "General News" section in the app shows a mix of
+articles spanning each category when this option is chosen.
+
 Additional Information
 
 The app uses the News API (https://newsapi.org/) to fetch news data. You'll need to register for a free API key.

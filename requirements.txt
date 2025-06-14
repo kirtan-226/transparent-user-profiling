@@ -7,3 +7,5 @@ requests==2.31.0
 pandas==2.0.3
 python-dotenv==1.0.0
 APScheduler==3.10.4
+nltk==3.8.1
+dash-bootstrap-components==1.5.0

@@ -108,6 +108,13 @@ class APIClient:
             headers=self.get_headers()
         )
         return response
+
+    def read_article(self, article_id):
+        response = requests.post(
+            f"{self.base_url}/user/read-article/{article_id}",
+            headers=self.get_headers()
+        )
+        return response
     
     def get_saved_articles(self):
         response = requests.get(
@@ -300,6 +307,8 @@ def create_news_feed_layout():
 
 def create_news_card(article, liked=False):
     like_label = "Liked!" if liked else "Like"
+    info_id = {"type": "info-btn", "index": article["article_id"]}
+    explanation = article.get("explanation", "") or "No explanation available"
     return dbc.Card([
         dbc.CardImg(
             src=article.get("urlToImage") if article.get("urlToImage") else "https://via.placeholder.com/300x200?text=No+Image",
@@ -309,15 +318,40 @@ def create_news_card(article, liked=False):
             html.H5(article["title"], className="card-title"),
             html.P(article["description"], className="card-text"),
             html.P([
-                html.Small(f"Source: {article['source']} | Category: {article['category'].capitalize()}",
-                          className="text-muted")
+                html.Small(
+                    f"Source: {article['source']} | Category: {article['category'].capitalize()}",
+                    className="text-muted"
+                )
             ]),
-            html.Small(article.get("explanation", ""), className="text-muted d-block mb-2"),
-            dbc.Button("Read More", href=article["url"], target="_blank", color="primary", className="me-2"),
-            dbc.Button("Save Article", id={"type": "save-article-btn", "index": article["article_id"]},
-                      color="success", className="me-2"),
-            dbc.Button(like_label, id={"type": "like-article-btn", "index": article["article_id"]},
-                      color="danger")
+            dbc.Button(
+                "i",
+                id=info_id,
+                color="secondary",
+                outline=True,
+                size="sm",
+                className="me-2",
+                style={"padding": "0.25rem 0.5rem"},
+            ),
+            dbc.Tooltip(explanation, target=info_id, placement="top"),
+            dbc.Button(
+                "Read More",
+                id={"type": "read-article-btn", "index": article["article_id"]},
+                href=article["url"],
+                target="_blank",
+                color="primary",
+                className="me-2",
+            ),
+            dbc.Button(
+                "Save Article",
+                id={"type": "save-article-btn", "index": article["article_id"]},
+                color="success",
+                className="me-2",
+            ),
+            dbc.Button(
+                like_label,
+                id={"type": "like-article-btn", "index": article["article_id"]},
+                color="danger",
+            ),
         ])
     ], className="mb-4 shadow-sm")
 
@@ -475,7 +509,10 @@ def update_news_feed(n_clicks, pathname, categories, keywords, locations, auth_d
             pers_data = pers_resp.json()
             pers_articles = pers_data.get('articles', [])
 
-        gen_resp = api_client.fetch_news(categories, keywords, locations or [])
+        gen_categories = categories
+        if not gen_categories or (len(gen_categories) == 1 and gen_categories[0] == "general"):
+            gen_categories = ALL_NEWS_CATEGORIES
+        gen_resp = api_client.fetch_news(gen_categories, keywords, locations or [])
         gen_articles = []
         if gen_resp.status_code == 200:
             gen_data = gen_resp.json()
@@ -617,6 +654,25 @@ def like_article(n_clicks, auth_data):
         except Exception:
             return "Error"
     return "Like"
+
+@app.callback(
+    Output({'type': 'read-article-btn', 'index': dash.dependencies.MATCH}, 'children'),
+    [Input({'type': 'read-article-btn', 'index': dash.dependencies.MATCH}, 'n_clicks')],
+    [State('auth-store', 'data')],
+    prevent_initial_call=True
+)
+def record_read(n_clicks, auth_data):
+    if n_clicks and auth_data and auth_data.get('token'):
+        try:
+            ctx = callback_context
+            if ctx.triggered:
+                button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+                article_id = json.loads(button_id)['index']
+                api_client.set_token(auth_data['token'])
+                api_client.read_article(article_id)
+        except Exception:
+            pass
+    return "Read More"
 
 if __name__ == '__main__':
     app.run(debug=True, port=8050)

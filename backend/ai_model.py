@@ -1,38 +1,103 @@
-from typing import List, Dict
+from typing import Dict, List, Set, Union
 from collections import Counter
 import re
+import nltk
+from nltk import pos_tag
+from nltk.corpus import wordnet
 
 WORD_RE = re.compile(r"[a-z0-9_-]+")
+
+STOP_WORDS = {
+    "a",
+    "an",
+    "the",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "to",
+    "of",
+    "for",
+    "and",
+    "or",
+    "in",
+    "on",
+    "at",
+    "with",
+    "without",
+    "by",
+}
+
 
 AVAILABLE_LOCATIONS = ["USA", "China", "India", "Russia", "UK", "Germany"]
 
 def extract_keywords(text: str) -> List[str]:
-    """Return sanitized keywords from a block of text."""
-    return WORD_RE.findall(text.lower())
+    """Return sanitized keywords from a block of text.
 
-def analyze_activity(saved_articles: List[Dict], preferences: Dict) -> Dict[str, List[str]]:
-    """Return recommended categories and locations based on liked articles and user preferences."""
-    category_counts: Counter = Counter()
-    location_counts: Counter = Counter()
+    Only nouns and verbs are kept, and common stop words are removed. Synonyms
+    for each keyword are also included using WordNet.
+    """
+    tokens = [t for t in WORD_RE.findall(text.lower()) if t not in STOP_WORDS]
 
-    for article in saved_articles:
-        category = article.get("category")
-        if category:
-            category_counts[category] += 1
+    keywords: List[str] = []
+    try:
+        tagged = pos_tag(tokens)
+    except Exception:
+        tagged = [(t, "") for t in tokens]
 
-        text = f"{article.get('title', '')} {article.get('description', '')}"
-        for loc in AVAILABLE_LOCATIONS:
-            if loc.lower() in text:
-                location_counts[loc] += 1
+    seen: Set[str] = set()
+    for word, tag in tagged:
+        if tag.startswith("NN") or tag.startswith("VB"):
+            if word not in seen:
+                keywords.append(word)
+                seen.add(word)
+            try:
+                synsets = wordnet.synsets(word)
+            except LookupError:
+                synsets = []
+            for syn in synsets:
+                for lemma in syn.lemmas():
+                    syn_word = lemma.name().replace("_", "-").lower()
+                    if syn_word not in STOP_WORDS and syn_word not in seen:
+                        keywords.append(syn_word)
+                        seen.add(syn_word)
+    return keywords
 
-    sorted_categories = [cat for cat, _ in category_counts.most_common()]
+
+def analyze_activity(
+    activity_data: Union[Dict, List[Dict]], preferences: Dict
+) -> Dict[str, List[str]]:
+    """Return recommended categories and locations using a user's interest profile.
+
+    The first argument may be either a saved user profile dictionary or a list of
+    previously interacted articles for backward compatibility.
+    """
+    keyword_counts: Counter = Counter()
+    if isinstance(activity_data, list):
+        for article in activity_data:
+            if not isinstance(article, dict):
+                continue
+            category = article.get("category")
+            if category:
+                category_counts[category] += 1
+            text = f"{article.get('title', '')} {article.get('description', '')}"
+            for word in extract_keywords(text):
+                keyword_counts[word] += 1
+    else:
+        user_profile = activity_data or {}
+        category_counts.update(user_profile.get("categories", {}))
+        keyword_counts.update(user_profile.get("keywords", {}))
+
     sorted_locations = [loc for loc, _ in location_counts.most_common()]
+    location_counts: Counter = Counter()
+    for word, cnt in keyword_counts.items():
+        for loc in AVAILABLE_LOCATIONS:
+            if word.lower() == loc.lower():
+                location_counts[loc] += cnt
 
-    rec_categories: List[str] = sorted_categories.copy()
-    for cat in preferences.get("categories", []):
-        if cat not in rec_categories:
-            rec_categories.append(cat)
-
+    sorted_locations = [loc for loc, _ in location_counts.most_common()]
     rec_locations: List[str] = sorted_locations.copy()
 
     for loc in preferences.get("locations", []):
@@ -45,7 +110,9 @@ def analyze_activity(saved_articles: List[Dict], preferences: Dict) -> Dict[str,
     }
 
 
-def rank_articles(articles: List[Dict], user_profile: Dict, rec_locations: List[str]) -> List[Dict]:
+def rank_articles(
+    articles: List[Dict], user_profile: Dict, rec_locations: List[str]
+) -> List[Dict]:
     """Score and rank articles based on a user's interest profile."""
     cat_scores = user_profile.get("categories", {})
     src_scores = user_profile.get("sources", {})
