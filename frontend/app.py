@@ -13,6 +13,8 @@ load_dotenv()
 # API Configuration
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000/api")
 
+ALL_NEWS_CATEGORIES = ["business", "entertainment", "general", "health", "science", "sports", "technology"]
+
 # Initialize the Dash app
 app = dash.Dash(__name__,
                 external_stylesheets=[dbc.themes.BOOTSTRAP],
@@ -198,7 +200,7 @@ def create_register_layout():
                                 {"label": "Sports", "value": "sports"},
                                 {"label": "Technology", "value": "technology"}
                             ],
-                            value=["general"],
+                            value=[],
                             inline=True,
                             className="mb-3"
                         ),
@@ -216,7 +218,6 @@ def create_register_layout():
 
 def create_news_feed_layout():
     return dbc.Container([
-        # Navbar
         dbc.Navbar([
             dbc.Container([
                 dbc.NavbarBrand("News Feed App", className="ms-2"),
@@ -230,9 +231,7 @@ def create_news_feed_layout():
             ])
         ], color="dark", dark=True, className="mb-4"),
 
-        # Main content
         dbc.Row([
-            # Sidebar for filters
             dbc.Col([
                 dbc.Card([
                     html.Div("News Preferences", className="card-header"),
@@ -285,10 +284,14 @@ def create_news_feed_layout():
                 ], className="shadow-sm")
             ], width=3),
 
-            # Main news feed
             dbc.Col([
-                html.H4("Latest News", className="mb-4"),
-                html.Div(id="news-feed-container", children=[
+                html.H4("Suggested News", className="mb-4"),
+                html.Div(id="suggested-news-container", children=[
+                    dbc.Spinner(color="primary", type="grow", fullscreen=False)
+                ]),
+                html.Hr(),
+                html.H4("General News", className="mb-4"),
+                html.Div(id="general-news-container", children=[
                     dbc.Spinner(color="primary", type="grow", fullscreen=False)
                 ]),
             ], width=9)
@@ -438,7 +441,6 @@ def load_categories(pathname, auth_data):
     
     return ["business", "entertainment", "general", "health", "science", "sports", "technology"]
     
-    # Default categories
     return [
         {"label": "General", "value": "general"},
         {"label": "Business", "value": "business"},
@@ -449,7 +451,8 @@ def load_categories(pathname, auth_data):
     ]
 
 @app.callback(
-    Output('news-feed-container', 'children'),
+    Output('suggested-news-container', 'children'),
+    Output('general-news-container', 'children'),
     [Input('apply-filters', 'n_clicks'),
      Input('url', 'pathname')],
     [State('category-filter', 'value'),
@@ -460,35 +463,36 @@ def load_categories(pathname, auth_data):
 )
 def update_news_feed(n_clicks, pathname, categories, keywords, locations, auth_data):
     if pathname != '/news-feed' or not auth_data or not auth_data.get('token'):
-        return []
+        return [], []
 
     try:
         api_client.set_token(auth_data['token'])
-        categories = categories or ["general"]
+        categories = categories or ALL_NEWS_CATEGORIES
         keywords = keywords or ""
-        
-        if n_clicks is None:
-            response = api_client.get_personalized_news()
-        else:
-            response = api_client.fetch_news(categories, keywords, locations or [])
-        if response.status_code == 200:
-            data = response.json()  # This returns {"articles": [...]}
-            articles = data.get('articles', [])  # Extract the articles array
-            
-            liked_ids = []
-            liked_resp = api_client.get_liked_articles()
-            if liked_resp.status_code == 200:
-                liked_data = liked_resp.json()
-                liked_ids = [a['article_id'] for a in liked_data.get('liked_articles', [])]
+        pers_resp = api_client.get_personalized_news()
+        pers_articles = []
+        if pers_resp.status_code == 200:
+            pers_data = pers_resp.json()
+            pers_articles = pers_data.get('articles', [])
 
-            if articles:
-                return [create_news_card(article, liked=article['article_id'] in liked_ids) for article in articles]
-            else:
+        gen_resp = api_client.fetch_news(categories, keywords, locations or [])
+        gen_articles = []
+        if gen_resp.status_code == 200:
+            gen_data = gen_resp.json()
+            gen_articles = gen_data.get('articles', [])
+
+        liked_ids = []
+        liked_resp = api_client.get_liked_articles()
+        if liked_resp.status_code == 200:
+            liked_data = liked_resp.json()
+            liked_ids = [a['article_id'] for a in liked_data.get('liked_articles', [])]
+
+        def _cards(articles):
+            if not articles:
                 return [html.Div("No articles found.", className="text-center text-muted")]
-        else:
-            error_msg = f"Error loading news (Status: {response.status_code})"
-            print(f"API Error: {response.text}")
-            return [html.Div(error_msg, className="text-center text-danger")]
+            return [create_news_card(a, liked=a['article_id'] in liked_ids) for a in articles]
+
+        return _cards(pers_articles), _cards(gen_articles)
     except Exception as e:
         print(f"Exception in update_news_feed: {str(e)}")
         return [html.Div(f"Connection error: {str(e)}", className="text-center text-danger")] 
@@ -546,8 +550,8 @@ def load_saved_articles(n_clicks, pathname, auth_data):
             api_client.set_token(auth_data['token'])
             response = api_client.get_saved_articles()
             if response.status_code == 200:
-                data = response.json()  # This returns {"saved_articles": [...]}
-                articles = data.get('saved_articles', [])  # Extract the saved_articles array
+                data = response.json()
+                articles = data.get('saved_articles', [])
                 if articles:
                     return [
                         html.Div([

@@ -39,7 +39,6 @@ def analyze_activity(saved_articles: List[Dict], preferences: Dict) -> Dict[str,
         if loc not in rec_locations:
             rec_locations.append(loc)
 
-    # Limit to top 5 categories
     return {
         "categories": rec_categories[:5],
         "locations": rec_locations[:5],

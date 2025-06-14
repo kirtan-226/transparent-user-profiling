@@ -46,20 +46,17 @@ def start_scheduler():
 def shutdown_scheduler():
     scheduler.shutdown()
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:8050"],  # React and Dash
+    allow_origins=["http://localhost:3000", "http://localhost:8050"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# MongoDB connection
 try:
     mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
     client = MongoClient(mongo_uri)
-    # Test the connection
     client.admin.command('ping')
     db = client.news_feed_db
     users_collection = db.users
@@ -68,9 +65,7 @@ try:
     print("MongoDB connected successfully")
 except Exception as e:
     print(f"MongoDB connection error: {e}")
-    # You might want to exit here or handle this appropriately
 
-# Configuration
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "758c48dbb96c4f96b40fd091e07070ac")
 SECRET_KEY = os.getenv("SECRET_KEY", "vishnu16")
 ALGORITHM = "HS256"
@@ -112,12 +107,11 @@ class NewsFilter(BaseModel):
     categories: Optional[List[str]] = ["general"]
     keywords: Optional[str] = ""
     locations: Optional[List[str]] = None
-    limit: Optional[int] = 50
+    limit: Optional[int] = 20
 
 
 def create_access_token(data: dict):
     to_encode = data.copy()
-    # Fix: Use timezone-aware datetime
     expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
@@ -125,7 +119,7 @@ def create_access_token(data: dict):
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
-        print(f"Verifying token: {credentials.credentials[:20]}...")  # Only print first 20 chars for security
+        print(f"Verifying token: {credentials.credentials[:20]}...")
         payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
         print(f"Token payload: {payload}")
         user_id = payload.get("sub")
@@ -168,7 +162,6 @@ def get_user_by_id(user_id: str):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        # Ensure user is a dictionary
         if not isinstance(user, dict):
             print(f"ERROR: User is not a dictionary, it's a {type(user)}: {user}")
             raise HTTPException(status_code=500, detail="Database returned invalid user data")
@@ -177,19 +170,14 @@ def get_user_by_id(user_id: str):
     except Exception as e:
         print(f"Error in get_user_by_id: {e}")
         raise
-
-# Authentication endpoints
 @app.post("/api/auth/register")
 async def register_user(user: UserRegister):
-    # Check if username exists
     if users_collection.find_one({"username": user.username}):
         raise HTTPException(status_code=400, detail="Username already exists")
     
-    # Check if email exists
     if users_collection.find_one({"email": user.email}):
         raise HTTPException(status_code=400, detail="Email already exists")
     
-    # Create new user
     user_id = str(uuid.uuid4())
     new_user = {
         "user_id": user_id,
@@ -204,7 +192,6 @@ async def register_user(user: UserRegister):
     
     users_collection.insert_one(new_user)
     
-    # Create default preferences
     default_preferences = {
         "user_id": user_id,
         "categories": user.categories if user.categories else ["general"],
@@ -221,12 +208,10 @@ async def register_user(user: UserRegister):
 
 @app.post("/api/auth/login")
 async def login_user(user: UserLogin):
-    # Find user
     user_data = users_collection.find_one({"username": user.username})
     if not user_data or not check_password_hash(user_data["password"], user.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    # Create access token
     access_token = create_access_token(data={"sub": user_data["user_id"]})
     
     return _convert_object_ids({
@@ -257,10 +242,9 @@ async def fetch_news(filters: NewsFilter, user_id: str = Depends(verify_token)):
         
         try:
             response = requests.get(url)
-            response.raise_for_status()  # Raise an exception for bad status codes
+            response.raise_for_status()
             news_data = response.json()
             
-            # Check if news_data is a dict and has the expected structure
             if not isinstance(news_data, dict):
                 raise HTTPException(status_code=500, detail="Invalid response format from news API")
             
@@ -270,14 +254,11 @@ async def fetch_news(filters: NewsFilter, user_id: str = Depends(verify_token)):
                     continue
                     
                 for article in articles[:filters.limit//len(filters.categories)]:
-                    # Ensure article is a dictionary
                     if not isinstance(article, dict):
                         continue
                         
-                    # Store article in database
                     article_id = str(uuid.uuid4())
                     
-                    # Safely get source information
                     source_info = article.get("source", {})
                     source_name = "Unknown"
                     if isinstance(source_info, dict):
@@ -298,7 +279,6 @@ async def fetch_news(filters: NewsFilter, user_id: str = Depends(verify_token)):
                         "created_at": datetime.now()
                     }
                     
-                    # Check if article already exists
                     existing = news_collection.find_one({"title": article_data["title"]})
                     if not existing:
                         news_collection.insert_one(article_data)
@@ -368,16 +348,15 @@ async def get_explore_news(limit: int = 10):
     articles = _fetch_trending_news(limit)
     return _convert_object_ids({"articles": articles})
 
-# New endpoint: personalized news feed using simple activity analysis
+
 @app.get("/api/news/personalized")
 async def get_personalized_news(user_id: str = Depends(verify_token)):
-    # Retrieve user preferences
+
     preferences = user_preferences_collection.find_one({"user_id": user_id}) or {
         "categories": ["general"],
         "keywords": ""
     }
 
-    # Gather saved articles for activity analysis
     user = get_user_by_id(user_id)
     liked_ids = user.get("liked_articles", []) if isinstance(user, dict) else []
     liked_articles = []
@@ -386,11 +365,16 @@ async def get_personalized_news(user_id: str = Depends(verify_token)):
         if article:
             liked_articles.append(article)
 
-    # Determine recommended categories
     rec_data = analyze_activity(liked_articles, preferences)
+    rec_categories = rec_data["categories"] or ["general"]
     rec_locations = rec_data["locations"]
 
-    filters = NewsFilter(limit=50)
+    filters = NewsFilter(
+        categories=rec_categories,
+        keywords=preferences.get("keywords", ""),
+        locations=rec_locations,
+        limit=20,
+    )
     result = await fetch_news(filters, user_id)
     user_profile = user.get("interest_profile", {"categories": {}, "sources": {}, "keywords": {}})
 
@@ -408,12 +392,10 @@ async def get_personalized_news(user_id: str = Depends(verify_token)):
     return result
 
 
-# User preferences endpoints
 @app.get("/api/user/preferences")
 async def get_user_preferences(user_id: str = Depends(verify_token)):
     preferences = user_preferences_collection.find_one({"user_id": user_id})
     if not preferences:
-        # Create default preferences
         default_preferences = {
             "user_id": user_id,
             "categories": ["general"],
@@ -426,7 +408,6 @@ async def get_user_preferences(user_id: str = Depends(verify_token)):
         user_preferences_collection.insert_one(default_preferences)
         return _convert_object_ids(default_preferences)
     
-    # Remove MongoDB's _id field for JSON serialization
     if "_id" in preferences:
         del preferences["_id"]
     
@@ -455,15 +436,12 @@ async def update_user_preferences(preferences: UserPreferences, user_id: str = D
     )
     return _convert_object_ids({"message": "Preferences updated successfully"})
 
-# Saved articles endpoints
 @app.post("/api/user/save-article/{article_id}")
 async def save_article(article_id: str, user_id: str = Depends(verify_token)):
-    # Check if article exists
     article = news_collection.find_one({"article_id": article_id})
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
     
-    # Add to user's saved articles
     users_collection.update_one(
         {"user_id": user_id},
         {"$addToSet": {"saved_articles": article_id}}
@@ -516,11 +494,9 @@ async def get_saved_articles(user_id: str = Depends(verify_token)):
     try:
         user = get_user_by_id(user_id)
         
-        # Debug: Print user data structure
         print(f"User data type: {type(user)}")
         print(f"User data: {user}")
         
-        # Ensure user is a dictionary
         if not isinstance(user, dict):
             print(f"ERROR: User is not a dictionary: {type(user)}")
             return _convert_object_ids({"saved_articles": []})
@@ -528,7 +504,6 @@ async def get_saved_articles(user_id: str = Depends(verify_token)):
         saved_article_ids = user.get("saved_articles", [])
         print(f"Saved article IDs: {saved_article_ids}, type: {type(saved_article_ids)}")
         
-        # Ensure saved_article_ids is a list
         if not isinstance(saved_article_ids, list):
             print(f"Warning: saved_article_ids is not a list: {type(saved_article_ids)}")
             saved_article_ids = []
@@ -538,7 +513,6 @@ async def get_saved_articles(user_id: str = Depends(verify_token)):
             print(f"Looking for article: {article_id}")
             article = news_collection.find_one({"article_id": article_id})
             if article:
-                # Remove MongoDB's _id field for JSON serialization
                 if "_id" in article:
                     del article["_id"]  
                 saved_articles.append(article)
