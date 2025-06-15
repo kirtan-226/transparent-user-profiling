@@ -75,6 +75,8 @@ def analyze_activity(
     previously interacted articles for backward compatibility.
     """
     keyword_counts: Counter = Counter()
+    category_counts: Counter = Counter()
+    location_counts: Counter = Counter()
     if isinstance(activity_data, list):
         for article in activity_data:
             if not isinstance(article, dict):
@@ -89,9 +91,15 @@ def analyze_activity(
         user_profile = activity_data or {}
         category_counts.update(user_profile.get("categories", {}))
         keyword_counts.update(user_profile.get("keywords", {}))
+        location_counts.update(user_profile.get("locations", {}))
+        
+    sorted_categories = [cat for cat, _ in category_counts.most_common()]
+    rec_categories: List[str] = sorted_categories.copy()
 
-    sorted_locations = [loc for loc, _ in location_counts.most_common()]
-    location_counts: Counter = Counter()
+    for cat in preferences.get("categories", []):
+        if cat not in rec_categories:
+            rec_categories.append(cat)
+
     for word, cnt in keyword_counts.items():
         for loc in AVAILABLE_LOCATIONS:
             if word.lower() == loc.lower():
@@ -108,6 +116,7 @@ def analyze_activity(
         "categories": rec_categories[:5],
         "locations": rec_locations[:5],
     }
+
 
 
 def rank_articles(

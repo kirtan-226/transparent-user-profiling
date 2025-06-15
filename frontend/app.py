@@ -518,6 +518,9 @@ def update_news_feed(n_clicks, pathname, categories, keywords, locations, auth_d
             gen_data = gen_resp.json()
             gen_articles = gen_data.get('articles', [])
 
+        pers_ids = {a.get('article_id') for a in pers_articles}
+        gen_articles = [a for a in gen_articles if a.get('article_id') not in pers_ids]
+
         liked_ids = []
         liked_resp = api_client.get_liked_articles()
         if liked_resp.status_code == 200:
