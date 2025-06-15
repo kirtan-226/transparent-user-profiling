@@ -38,7 +38,7 @@ def scheduled_news_fetch():
 
 @app.on_event("startup")
 def start_scheduler():
-    scheduler.add_job(scheduled_news_fetch, "interval", minutes=2)
+    scheduler.add_job(scheduled_news_fetch, "interval", minutes=60)
     scheduler.start()
 
 
@@ -66,8 +66,8 @@ try:
 except Exception as e:
     print(f"MongoDB connection error: {e}")
 
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "862309ce6bc0435383c01db4ed148b11")
-SECRET_KEY = os.getenv("SECRET_KEY", "Mahant@226")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "5c7e5d6038be4c8893fd61c38c63b8a5")
+SECRET_KEY = os.getenv("SECRET_KEY", "qwerty@123")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -107,7 +107,7 @@ class NewsFilter(BaseModel):
     categories: Optional[List[str]] = ["general"]
     keywords: Optional[str] = ""
     locations: Optional[List[str]] = None
-    limit: Optional[int] = 20
+    limit: Optional[int] = 40
 
 
 def create_access_token(data: dict):

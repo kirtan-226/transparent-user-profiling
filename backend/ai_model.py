@@ -4,8 +4,13 @@ import re
 import nltk
 from nltk import pos_tag
 from nltk.corpus import wordnet
+from nltk.stem import PorterStemmer
 
 WORD_RE = re.compile(r"[a-z0-9_-]+")
+STEMMER = PorterStemmer()
+def _normalize(word: str) -> str:
+    """Return a lowercased stem for consistent keyword matching."""
+    return STEMMER.stem(word.lower())
 
 STOP_WORDS = {
     "a",
@@ -50,16 +55,17 @@ def extract_keywords(text: str) -> List[str]:
     seen: Set[str] = set()
     for word, tag in tagged:
         if tag.startswith("NN") or tag.startswith("VB"):
-            if word not in seen:
-                keywords.append(word)
-                seen.add(word)
+            stem = _normalize(word)
+            if stem not in seen:
+                keywords.append(stem)
+                seen.add(stem)
             try:
                 synsets = wordnet.synsets(word)
             except LookupError:
                 synsets = []
-            for syn in synsets:
-                for lemma in syn.lemmas():
-                    syn_word = lemma.name().replace("_", "-").lower()
+            for syn in synsets[:2]:
+                for lemma in syn.lemmas()[:2]:
+                    syn_word = _normalize(lemma.name().replace("_", "-"))
                     if syn_word not in STOP_WORDS and syn_word not in seen:
                         keywords.append(syn_word)
                         seen.add(syn_word)
@@ -142,7 +148,7 @@ def rank_articles(
         if src:
             score += src_scores.get(src, 0)
         for word in extract_keywords(text):
-            score += kw_scores.get(word, 0)
+            score += kw_scores.get(word, 0) * 1.5
         article["_score"] = score
 
     articles.sort(key=lambda a: a.get("_score", 0), reverse=True)

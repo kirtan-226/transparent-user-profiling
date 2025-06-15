@@ -61,7 +61,7 @@ class APIClient:
         )
         return response
     
-    def fetch_news(self, categories, keywords="", locations=None, limit=20):
+    def fetch_news(self, categories, keywords="", locations=None, limit=40):
         response = requests.post(
             f"{self.base_url}/news/fetch",
             json={"categories": categories, "keywords": keywords, "locations": locations, "limit": limit},
