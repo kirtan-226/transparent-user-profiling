@@ -66,7 +66,7 @@ try:
 except Exception as e:
     print(f"MongoDB connection error: {e}")
 
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "5c7e5d6038be4c8893fd61c38c63b8a5")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "862309ce6bc0435383c01db4ed148b11")
 SECRET_KEY = os.getenv("SECRET_KEY", "qwerty@123")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
@@ -120,7 +120,9 @@ def create_access_token(data: dict):
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
         print(f"Verifying token: {credentials.credentials[:20]}...")
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(
+            credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM]
+        )
         print(f"Token payload: {payload}")
         user_id = payload.get("sub")
         print(f"User ID from token: {user_id}")
@@ -155,7 +157,9 @@ def get_user_by_id(user_id: str):
         user = users_collection.find_one({"user_id": user_id})
         print(f"User lookup result: {type(user)}")
         if user:
-            print(f"User found: {user.get('username', 'No username') if isinstance(user, dict) else 'User is not dict'}")
+            print(
+                f"User found: {user.get('username', 'No username') if isinstance(user, dict) else 'User is not dict'}"
+            )
         else:
             print("No user found")
         
@@ -164,7 +168,9 @@ def get_user_by_id(user_id: str):
         
         if not isinstance(user, dict):
             print(f"ERROR: User is not a dictionary, it's a {type(user)}: {user}")
-            raise HTTPException(status_code=500, detail="Database returned invalid user data")
+            raise HTTPException(
+                status_code=500, detail="Database returned invalid user data"
+            )
             
         return user
     except Exception as e:
@@ -369,6 +375,11 @@ async def get_personalized_news(user_id: str = Depends(verify_token)):
     rec_data = analyze_activity(user_profile, preferences)
     rec_categories = rec_data["categories"] or ["general"]
     rec_locations = rec_data["locations"]
+    rec_keywords = rec_data["keywords"]
+
+    profile_kw = " ".join(rec_keywords)
+    pref_kw = preferences.get("keywords", "")
+    combined_kw = " ".join(k for k in [pref_kw, profile_kw] if k).strip()
 
     filters = NewsFilter(
         categories=rec_categories,

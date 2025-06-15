@@ -6,6 +6,22 @@ from nltk import pos_tag
 from nltk.corpus import wordnet
 from nltk.stem import PorterStemmer
 
+def _ensure_nltk_data() -> None:
+    """Download required NLTK data if not already present."""
+    packages = {
+        "punkt": "tokenizers/punkt",
+        "averaged_perceptron_tagger": "taggers/averaged_perceptron_tagger",
+        "wordnet": "corpora/wordnet",
+    }
+    for pkg, res in packages.items():
+        try:
+            nltk.data.find(res)
+        except LookupError:
+            nltk.download(pkg)
+
+
+_ensure_nltk_data()
+
 WORD_RE = re.compile(r"[a-z0-9_-]+")
 STEMMER = PorterStemmer()
 def _normalize(word: str) -> str:
@@ -106,6 +122,14 @@ def analyze_activity(
         if cat not in rec_categories:
             rec_categories.append(cat)
 
+    sorted_keywords = [w for w, _ in keyword_counts.most_common()]
+    rec_keywords: List[str] = sorted_keywords.copy()
+    pref_kw_string = preferences.get("keywords", "")
+    if pref_kw_string:
+        for kw in extract_keywords(pref_kw_string):
+            if kw not in rec_keywords:
+                rec_keywords.append(kw)
+
     for word, cnt in keyword_counts.items():
         for loc in AVAILABLE_LOCATIONS:
             if word.lower() == loc.lower():
@@ -121,6 +145,7 @@ def analyze_activity(
     return {
         "categories": rec_categories[:5],
         "locations": rec_locations[:5],
+        "keywords": rec_keywords[:5],
     }
 
 
