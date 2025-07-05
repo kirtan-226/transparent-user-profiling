@@ -4,6 +4,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional
+from collections import Counter
 from apscheduler.schedulers.background import BackgroundScheduler
 from bson import ObjectId
 import re
@@ -16,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 from dotenv import load_dotenv
-from ai_model import analyze_activity, rank_articles, extract_keywords
+from ai_model import analyze_activity, rank_articles, extract_keywords, AVAILABLE_LOCATIONS
 
 # Load environment variables
 load_dotenv()
@@ -66,7 +67,7 @@ try:
 except Exception as e:
     print(f"MongoDB connection error: {e}")
 
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "862309ce6bc0435383c01db4ed148b11")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "397dc406e6994441a97132e3f2a2d698")
 SECRET_KEY = os.getenv("SECRET_KEY", "qwerty@123")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
@@ -104,7 +105,7 @@ class Article(BaseModel):
     explanation: Optional[str] = ""
 
 class NewsFilter(BaseModel):
-    categories: Optional[List[str]] = ["general"]
+    categories: Optional[List[str]] = []
     keywords: Optional[str] = ""
     locations: Optional[List[str]] = None
     limit: Optional[int] = 40
@@ -193,14 +194,19 @@ async def register_user(user: UserRegister):
         "created_at": datetime.now(),
         "saved_articles": [],
         "liked_articles": [],
-        "interest_profile": {"categories": {}, "sources": {}, "keywords": {}}
+        "interest_profile": {
+            "categories": {cat: 1 for cat in (user.categories or [])},
+            "sources": {},
+            "keywords": {},
+            "locations": {}
+        }
     }
     
     users_collection.insert_one(new_user)
     
     default_preferences = {
         "user_id": user_id,
-        "categories": user.categories if user.categories else ["general"],
+        "categories": user.categories if user.categories else [],
         "keywords": "",
         "locations": [],
         "share_read_time": False,
@@ -354,6 +360,52 @@ def _fetch_trending_news(limit: int = 10):
         print(f"Error fetching trending news: {e}")
     return news_articles
 
+def _get_global_category_source_rankings(limit: int = 5):
+    """Return most popular categories and sources across all users."""
+    cat_counter = Counter()
+    src_counter = Counter()
+    try:
+        for user in users_collection.find({}, {"interest_profile": 1}):
+            profile = user.get("interest_profile", {})
+            cat_counter.update(profile.get("categories", {}))
+            src_counter.update(profile.get("sources", {}))
+    except Exception as e:
+        print(f"Error computing global rankings: {e}")
+    top_categories = [c for c, _ in cat_counter.most_common(limit)]
+    top_sources = [s for s, _ in src_counter.most_common(limit)]
+    return top_categories, top_sources
+
+
+def _rank_categories_with_tfidf(user_profile: dict, preferences: dict) -> List[str]:
+    """Return categories ranked by similarity to a user's keywords."""
+    all_categories = [
+        "business",
+        "entertainment",
+        "general",
+        "health",
+        "science",
+        "sports",
+        "technology",
+    ]
+
+    category_docs = {}
+    for cat in all_categories:
+        docs = news_collection.find({"category": cat})
+        text_parts = []
+        for d in docs:
+            if isinstance(d, dict):
+                title = d.get("title", "")
+                desc = d.get("description", "")
+                text_parts.append(f"{title} {desc}")
+        category_docs[cat] = " ".join(text_parts)
+
+    user_kw = list(user_profile.get("keywords", {}).keys())
+    pref_kw = preferences.get("keywords", "")
+    if pref_kw:
+        user_kw.extend(extract_keywords(pref_kw))
+
+    ranked = rank_categories_by_liking(user_kw, category_docs)
+    return ranked if ranked else all_categories
 
 @app.get("/api/news/explore")
 async def get_explore_news(limit: int = 10):
@@ -365,21 +417,28 @@ async def get_explore_news(limit: int = 10):
 async def get_personalized_news(user_id: str = Depends(verify_token)):
 
     preferences = user_preferences_collection.find_one({"user_id": user_id}) or {
-        "categories": ["general"],
-        "keywords": ""
+        "categories": [],
+        "keywords": "",
+        "locations": [],
+        "share_read_time": False,
+        "experimental_opt_in": False,
     }
 
     user = get_user_by_id(user_id)
     user_profile = user.get("interest_profile", {"categories": {}, "sources": {}, "keywords": {}})
 
     rec_data = analyze_activity(user_profile, preferences)
-    rec_categories = rec_data["categories"] or ["general"]
-    rec_locations = rec_data["locations"]
-    rec_keywords = rec_data["keywords"]
+    rec_categories = preferences.get("categories") or rec_data["categories"]
 
-    profile_kw = " ".join(rec_keywords)
-    pref_kw = preferences.get("keywords", "")
-    combined_kw = " ".join(k for k in [pref_kw, profile_kw] if k).strip()
+    if not user_profile.get("categories") and not preferences.get("categories"):
+        global_cats, global_srcs = _get_global_category_source_rankings()
+        rec_categories = global_cats or ["general"]
+        if not user_profile.get("sources"):
+            user_profile["sources"] = {s: 1 for s in global_srcs}
+        if not user_profile.get("categories"):
+            user_profile["categories"] = {c: 1 for c in rec_categories}
+    else:
+        rec_categories = _rank_categories_with_tfidf(user_profile, preferences)
 
     filters = NewsFilter(
         categories=rec_categories,
@@ -446,6 +505,17 @@ async def update_user_preferences(preferences: UserPreferences, user_id: str = D
         }},
         upsert=True
     )
+    inc_fields = {}
+    for cat in preferences.categories:
+        inc_fields[f"interest_profile.categories.{cat}"] = inc_fields.get(f"interest_profile.categories.{cat}", 0) + 1
+    for word in extract_keywords(preferences.keywords or ""):
+        inc_fields[f"interest_profile.keywords.{word}"] = inc_fields.get(f"interest_profile.keywords.{word}", 0) + 1
+        if word.title() in AVAILABLE_LOCATIONS:
+            inc_fields[f"interest_profile.locations.{word.title()}"] = inc_fields.get(f"interest_profile.locations.{word.title()}", 0) + 1
+    for loc in preferences.locations:
+        inc_fields[f"interest_profile.locations.{loc}"] = inc_fields.get(f"interest_profile.locations.{loc}", 0) + 1
+    if inc_fields:
+        users_collection.update_one({"user_id": user_id}, {"$inc": inc_fields})
     return _convert_object_ids({"message": "Preferences updated successfully"})
 
 def _increment_interest_profile(user_id: str, article: dict):
@@ -461,6 +531,9 @@ def _increment_interest_profile(user_id: str, article: dict):
     for word in set(extract_keywords(text)):
         field = f"interest_profile.keywords.{word}"
         inc_fields[field] = inc_fields.get(field, 0) + 1
+        if word.title() in AVAILABLE_LOCATIONS:
+            loc_field = f"interest_profile.locations.{word.title()}"
+            inc_fields[loc_field] = inc_fields.get(loc_field, 0) + 1
     if inc_fields:
         users_collection.update_one({"user_id": user_id}, {"$inc": inc_fields})
 

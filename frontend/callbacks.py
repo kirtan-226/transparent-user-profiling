@@ -132,12 +132,54 @@ def register_callbacks(app, api_client):
                         category_list = categories['categories']
                         return [{'label': cat.title(), 'value': cat} for cat in category_list]
                     else:
-                        return ["business", "entertainment", "general", "health", "science", "sports", "technology"]
+                        return [
+                            {"label": "Business", "value": "business"},
+                            {"label": "Entertainment", "value": "entertainment"},
+                            {"label": "General", "value": "general"},
+                            {"label": "Health", "value": "health"},
+                            {"label": "Science", "value": "science"},
+                            {"label": "Sports", "value": "sports"},
+                            {"label": "Technology", "value": "technology"},
+                        ]
             except Exception as e:
                 print(f"Error loading categories: {e}")
-                return ["business", "entertainment", "general", "health", "science", "sports", "technology"]
+                return [
+                    {"label": "Business", "value": "business"},
+                    {"label": "Entertainment", "value": "entertainment"},
+                    {"label": "General", "value": "general"},
+                    {"label": "Health", "value": "health"},
+                    {"label": "Science", "value": "science"},
+                    {"label": "Sports", "value": "sports"},
+                    {"label": "Technology", "value": "technology"},
+                ]
 
-        return ["business", "entertainment", "general", "health", "science", "sports", "technology"]
+        return [
+            {"label": "Business", "value": "business"},
+            {"label": "Entertainment", "value": "entertainment"},
+            {"label": "General", "value": "general"},
+            {"label": "Health", "value": "health"},
+            {"label": "Science", "value": "science"},
+            {"label": "Sports", "value": "sports"},
+            {"label": "Technology", "value": "technology"},
+        ]
+
+    @app.callback(
+        Output('category-filter', 'value'),
+        [Input('url', 'pathname')],
+        [State('auth-store', 'data')],
+        prevent_initial_call=False
+    )
+    def load_preference_categories(pathname, auth_data):
+        if pathname == '/news-feed' and auth_data and auth_data.get('token'):
+            try:
+                api_client.set_token(auth_data['token'])
+                response = api_client.get_preferences()
+                if response.status_code == 200:
+                    prefs = response.json()
+                    return prefs.get('categories', [])
+            except Exception as e:
+                print(f"Error loading user preference categories: {e}")
+        return []
 
     @app.callback(
         Output('suggested-news-container', 'children'),
@@ -156,17 +198,35 @@ def register_callbacks(app, api_client):
 
         try:
             api_client.set_token(auth_data['token'])
-            categories = categories or ALL_NEWS_CATEGORIES
+            categories = categories or []
             keywords = keywords or ""
+
+            # persist selected categories in user preferences
+            try:
+                pref_resp = api_client.get_preferences()
+                if pref_resp.status_code == 200:
+                    prefs = pref_resp.json()
+                else:
+                    prefs = {}
+
+                api_client.update_preferences(
+                    categories,
+                    keywords,
+                    locations or prefs.get('locations', []),
+                    share_read_time=prefs.get('share_read_time', False),
+                    experimental_opt_in=prefs.get('experimental_opt_in', False)
+                )
+            except Exception as pref_err:
+                print(f"Error updating preferences from filters: {pref_err}")
+
+            fetch_categories = categories or ALL_NEWS_CATEGORIES
             pers_resp = api_client.get_personalized_news()
             pers_articles = []
             if pers_resp.status_code == 200:
                 pers_data = pers_resp.json()
                 pers_articles = pers_data.get('articles', [])
 
-            gen_categories = categories
-            if not gen_categories or (len(gen_categories) == 1 and gen_categories[0] == "general"):
-                gen_categories = ALL_NEWS_CATEGORIES
+            gen_categories = fetch_categories
             gen_resp = api_client.fetch_news(gen_categories, keywords, locations or [])
             gen_articles = []
             if gen_resp.status_code == 200:

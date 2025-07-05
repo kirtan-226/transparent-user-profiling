@@ -5,6 +5,8 @@ import nltk
 from nltk import pos_tag
 from nltk.corpus import wordnet
 from nltk.stem import PorterStemmer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import linear_kernel
 
 def _ensure_nltk_data() -> None:
     """Download required NLTK data if not already present."""
@@ -196,3 +198,21 @@ def rank_articles(
             article["explanation"] += " | " + ", ".join(explanations)
 
     return articles
+
+
+def rank_categories_by_liking(user_keywords: List[str], category_docs: Dict[str, str]) -> List[str]:
+    """Rank categories using a TF‑IDF similarity between user keywords and
+    category documents."""
+    if not category_docs:
+        return []
+
+    vectorizer = TfidfVectorizer(stop_words="english")
+    tfidf_matrix = vectorizer.fit_transform(category_docs.values())
+    if user_keywords:
+        user_vec = vectorizer.transform([" ".join(user_keywords)])
+    else:
+        user_vec = vectorizer.transform([" "])
+
+    scores = linear_kernel(user_vec, tfidf_matrix).flatten()
+    ranked = sorted(zip(category_docs.keys(), scores), key=lambda x: x[1], reverse=True)
+    return [cat for cat, _ in ranked]

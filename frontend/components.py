@@ -88,9 +88,17 @@ def create_news_feed_layout():
                         html.H6("Categories"),
                         dbc.Checklist(
                             id="category-filter",
-                            options=["business", "entertainment", "general", "health", "science", "sports", "technology"],
-                            value=["general"],
-                            inline=True
+                            options=[
+                                {"label": "Business", "value": "business"},
+                                {"label": "Entertainment", "value": "entertainment"},
+                                {"label": "General", "value": "general"},
+                                {"label": "Health", "value": "health"},
+                                {"label": "Science", "value": "science"},
+                                {"label": "Sports", "value": "sports"},
+                                {"label": "Technology", "value": "technology"},
+                            ],
+                            value=[],
+                            inline=True,
                         ),
                         html.Hr(),
                         html.H6("Search"),
