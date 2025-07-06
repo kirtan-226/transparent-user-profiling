@@ -7,6 +7,7 @@ from typing import List, Optional
 from collections import Counter
 from apscheduler.schedulers.background import BackgroundScheduler
 from bson import ObjectId
+from collections import Counter
 import re
 from pymongo import MongoClient
 import os
@@ -17,7 +18,14 @@ from datetime import datetime, timedelta, timezone
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 from dotenv import load_dotenv
-from ai_model import analyze_activity, rank_articles, extract_keywords, AVAILABLE_LOCATIONS
+from ai_model import (
+    analyze_activity,
+    recommend_articles,
+    extract_keywords,
+    AVAILABLE_LOCATIONS,
+    increment_interest_profile,
+    rank_categories_by_tfidf
+)
 
 # Load environment variables
 load_dotenv()
@@ -404,7 +412,7 @@ def _rank_categories_with_tfidf(user_profile: dict, preferences: dict) -> List[s
     if pref_kw:
         user_kw.extend(extract_keywords(pref_kw))
 
-    ranked = rank_categories_by_liking(user_kw, category_docs)
+    ranked = rank_categories_by_tfidf(user_kw, category_docs)
     return ranked if ranked else all_categories
 
 @app.get("/api/news/explore")
@@ -425,7 +433,12 @@ async def get_personalized_news(user_id: str = Depends(verify_token)):
     }
 
     user = get_user_by_id(user_id)
-    user_profile = user.get("interest_profile", {"categories": {}, "sources": {}, "keywords": {}})
+    user_profile = {
+        "categories": Counter(user.get("interest_profile", {}).get("categories", {})),
+        "sources": Counter(user.get("interest_profile", {}).get("sources", {})),
+        "keywords": Counter(user.get("interest_profile", {}).get("keywords", {})),
+        "locations": Counter(user.get("interest_profile", {}).get("locations", {})),
+    }
 
     rec_data = analyze_activity(user_profile, preferences)
     rec_categories = preferences.get("categories") or rec_data["categories"]
@@ -443,14 +456,14 @@ async def get_personalized_news(user_id: str = Depends(verify_token)):
     filters = NewsFilter(
         categories=rec_categories,
         keywords=preferences.get("keywords", ""),
-        locations=rec_locations,
+        # locations=rec_locations,
         limit=20,
     )
     result = await fetch_news(filters, user_id)
     user_profile = user_profile
 
     articles = result.get("articles", [])
-    articles = rank_articles(articles, user_profile, rec_locations)
+    articles = recommend_articles(user_profile, articles)
 
     if preferences.get("experimental_opt_in"):
         trending = _fetch_trending_news(5)
@@ -495,27 +508,54 @@ async def get_user_preferences(user_id: str = Depends(verify_token)):
 async def update_user_preferences(preferences: UserPreferences, user_id: str = Depends(verify_token)):
     user_preferences_collection.update_one(
         {"user_id": user_id},
-        {"$set": {
-            "categories": preferences.categories,
-            "keywords": preferences.keywords,
-            "locations": preferences.locations,
-            "share_read_time": preferences.share_read_time,
-            "experimental_opt_in": preferences.experimental_opt_in,
-            "updated_at": datetime.now()
-        }},
-        upsert=True
+        {
+            "$set": {
+                "categories": preferences.categories,
+                "keywords": preferences.keywords,
+                "locations": preferences.locations,
+                "share_read_time": preferences.share_read_time,
+                "experimental_opt_in": preferences.experimental_opt_in,
+                "updated_at": datetime.now(),
+            }
+        },
+        upsert=True,
     )
-    inc_fields = {}
+
+    user = users_collection.find_one({"user_id": user_id}) or {}
+    profile = {
+        "categories": Counter(user.get("interest_profile", {}).get("categories", {})),
+        "sources": Counter(user.get("interest_profile", {}).get("sources", {})),
+        "keywords": Counter(user.get("interest_profile", {}).get("keywords", {})),
+        "locations": Counter(user.get("interest_profile", {}).get("locations", {})),
+    }
+
+    pseudo_article = {
+        "category": None,
+        "source": None,
+        "title": preferences.keywords,
+        "description": "",
+    }
+
     for cat in preferences.categories:
-        inc_fields[f"interest_profile.categories.{cat}"] = inc_fields.get(f"interest_profile.categories.{cat}", 0) + 1
-    for word in extract_keywords(preferences.keywords or ""):
-        inc_fields[f"interest_profile.keywords.{word}"] = inc_fields.get(f"interest_profile.keywords.{word}", 0) + 1
-        if word.title() in AVAILABLE_LOCATIONS:
-            inc_fields[f"interest_profile.locations.{word.title()}"] = inc_fields.get(f"interest_profile.locations.{word.title()}", 0) + 1
+        profile["categories"][cat] += 1
+
     for loc in preferences.locations:
-        inc_fields[f"interest_profile.locations.{loc}"] = inc_fields.get(f"interest_profile.locations.{loc}", 0) + 1
-    if inc_fields:
-        users_collection.update_one({"user_id": user_id}, {"$inc": inc_fields})
+        profile["locations"][loc] += 1
+
+    profile = increment_interest_profile(profile, pseudo_article)
+
+    users_collection.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "interest_profile.categories": dict(profile["categories"]),
+                "interest_profile.sources": dict(profile["sources"]),
+                "interest_profile.keywords": dict(profile["keywords"]),
+                "interest_profile.locations": dict(profile["locations"]),
+            }
+        }
+    )
+
     return _convert_object_ids({"message": "Preferences updated successfully"})
 
 def _increment_interest_profile(user_id: str, article: dict):
@@ -547,10 +587,31 @@ async def save_article(article_id: str, user_id: str = Depends(verify_token)):
         {"user_id": user_id},
         {"$addToSet": {"saved_articles": article_id}}
     )
-    _increment_interest_profile(user_id, article)
+
+    user = users_collection.find_one({"user_id": user_id}) or {}
+    profile = {
+        "categories": Counter(user.get("interest_profile", {}).get("categories", {})),
+        "sources": Counter(user.get("interest_profile", {}).get("sources", {})),
+        "keywords": Counter(user.get("interest_profile", {}).get("keywords", {})),
+        "locations": Counter(user.get("interest_profile", {}).get("locations", {})),
+    }
+
+    updated_profile = increment_interest_profile(profile, article)
+
+    users_collection.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "interest_profile.categories": dict(updated_profile["categories"]),
+                "interest_profile.sources": dict(updated_profile["sources"]),
+                "interest_profile.keywords": dict(updated_profile["keywords"]),
+                "interest_profile.locations": dict(updated_profile["locations"]),
+            }
+        }
+    )
+
     return _convert_object_ids({"message": "Article saved successfully"})
 
-# Like articles endpoints
 @app.post("/api/user/like-article/{article_id}")
 async def like_article(article_id: str, user_id: str = Depends(verify_token)):
     article = news_collection.find_one({"article_id": article_id})
@@ -558,10 +619,33 @@ async def like_article(article_id: str, user_id: str = Depends(verify_token)):
         raise HTTPException(status_code=404, detail="Article not found")
 
     users_collection.update_one(
-        {"user_id": user_id}, {"$addToSet": {"liked_articles": article_id}}
+        {"user_id": user_id},
+        {"$addToSet": {"liked_articles": article_id}}
     )
 
-    _increment_interest_profile(user_id, article)
+    user = users_collection.find_one({"user_id": user_id}) or {}
+    profile = {
+        "categories": Counter(user.get("interest_profile", {}).get("categories", {})),
+        "sources": Counter(user.get("interest_profile", {}).get("sources", {})),
+        "keywords": Counter(user.get("interest_profile", {}).get("keywords", {})),
+        "locations": Counter(user.get("interest_profile", {}).get("locations", {})),
+    }
+
+    article["interaction"] = 3
+    updated_profile = increment_interest_profile(profile, article)
+
+    users_collection.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "interest_profile.categories": dict(updated_profile["categories"]),
+                "interest_profile.sources": dict(updated_profile["sources"]),
+                "interest_profile.keywords": dict(updated_profile["keywords"]),
+                "interest_profile.locations": dict(updated_profile["locations"]),
+            }
+        }
+    )
+
     return _convert_object_ids({"message": "Article liked"})
 
 @app.post("/api/user/read-article/{article_id}")
@@ -571,7 +655,30 @@ async def read_article(article_id: str, user_id: str = Depends(verify_token)):
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
 
-    _increment_interest_profile(user_id, article)
+    user = users_collection.find_one({"user_id": user_id}) or {}
+    profile = {
+        "categories": Counter(user.get("interest_profile", {}).get("categories", {})),
+        "sources": Counter(user.get("interest_profile", {}).get("sources", {})),
+        "keywords": Counter(user.get("interest_profile", {}).get("keywords", {})),
+        "locations": Counter(user.get("interest_profile", {}).get("locations", {})),
+    }
+
+    article["interaction"] = 1
+
+    updated_profile = increment_interest_profile(profile, article)
+
+    users_collection.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "interest_profile.categories": dict(updated_profile["categories"]),
+                "interest_profile.sources": dict(updated_profile["sources"]),
+                "interest_profile.keywords": dict(updated_profile["keywords"]),
+                "interest_profile.locations": dict(updated_profile["locations"]),
+            }
+        }
+    )
+
     return _convert_object_ids({"message": "Article read"})
 
 @app.get("/api/user/liked-articles")
