@@ -264,6 +264,7 @@ async def fetch_news(filters: NewsFilter, user_id: str = Depends(verify_token)):
         if filters.locations:
             query_parts.append(" OR ".join(filters.locations))
         if query_parts:
+            print("Final NewsAPI URL:", url)
             url += "&q=" + quote_plus(" ".join(query_parts))
         
         try:
@@ -423,7 +424,7 @@ async def get_explore_news(limit: int = 10):
 
 @app.get("/api/news/personalized")
 async def get_personalized_news(user_id: str = Depends(verify_token)):
-
+    # Step 1: Fetch user preferences and profile
     preferences = user_preferences_collection.find_one({"user_id": user_id}) or {
         "categories": [],
         "keywords": "",
@@ -440,35 +441,34 @@ async def get_personalized_news(user_id: str = Depends(verify_token)):
         "locations": Counter(user.get("interest_profile", {}).get("locations", {})),
     }
 
+    # Step 2: Analyze activity if no preferences
     rec_data = analyze_activity(user_profile, preferences)
-    rec_categories = preferences.get("categories") or rec_data["categories"]
 
-    if not user_profile.get("categories") and not preferences.get("categories"):
-        global_cats, global_srcs = _get_global_category_source_rankings()
-        rec_categories = global_cats or ["general"]
-        if not user_profile.get("sources"):
-            user_profile["sources"] = {s: 1 for s in global_srcs}
-        if not user_profile.get("categories"):
-            user_profile["categories"] = {c: 1 for c in rec_categories}
-    else:
-        rec_categories = _rank_categories_with_tfidf(user_profile, preferences)
+    # Step 3: Only get recommended categories & keywords
+    rec_categories = preferences.get("categories") or rec_data.get("categories", [])
+    rec_keywords = preferences.get("keywords") or " ".join(rec_data.get("keywords", []))
 
+    print("🔍 Categories for fetch:", rec_categories)
+    print("🔍 Keywords for fetch:", rec_keywords)
+
+    # Step 4: Call fetch_news with filtered categories/keywords
     filters = NewsFilter(
         categories=rec_categories,
-        keywords=preferences.get("keywords", ""),
-        # locations=rec_locations,
+        keywords=rec_keywords,
+        locations=[],  # locations not used
         limit=20,
     )
     result = await fetch_news(filters, user_id)
-    user_profile = user_profile
-
     articles = result.get("articles", [])
+
+    # Step 5: Score articles with recommend_articles
     articles = recommend_articles(user_profile, articles)
 
-    if preferences.get("experimental_opt_in"):
+    # Step 6: Optionally mix in trending if not enough personalized content
+    if preferences.get("experimental_opt_in") and len(articles) < 10:
         trending = _fetch_trending_news(5)
         for article in trending:
-            article["explanation"] += " | Explore recommendation"
+            article["explanation"] += " | Trending"
             article["_score"] = 0
         articles.extend(trending)
 
@@ -558,24 +558,6 @@ async def update_user_preferences(preferences: UserPreferences, user_id: str = D
 
     return _convert_object_ids({"message": "Preferences updated successfully"})
 
-def _increment_interest_profile(user_id: str, article: dict):
-    """Increase a user's interest profile counts based on an article."""
-    inc_fields = {}
-    category = article.get("category")
-    source = article.get("source")
-    text = f"{article.get('title', '')} {article.get('description', '')}"
-    if category:
-        inc_fields[f"interest_profile.categories.{category}"] = 1
-    if source:
-        inc_fields[f"interest_profile.sources.{source}"] = 1
-    for word in set(extract_keywords(text)):
-        field = f"interest_profile.keywords.{word}"
-        inc_fields[field] = inc_fields.get(field, 0) + 1
-        if word.title() in AVAILABLE_LOCATIONS:
-            loc_field = f"interest_profile.locations.{word.title()}"
-            inc_fields[loc_field] = inc_fields.get(loc_field, 0) + 1
-    if inc_fields:
-        users_collection.update_one({"user_id": user_id}, {"$inc": inc_fields})
 
 @app.post("/api/user/save-article/{article_id}")
 async def save_article(article_id: str, user_id: str = Depends(verify_token)):

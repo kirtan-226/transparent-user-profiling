@@ -3,7 +3,7 @@ from collections import Counter
 import re
 import nltk
 from nltk import pos_tag
-from nltk.corpus import wordnet
+from nltk.corpus import wordnet, stopwords
 from nltk.stem import PorterStemmer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -12,10 +12,11 @@ import numpy as np
 nltk.download("punkt")
 nltk.download("averaged_perceptron_tagger")
 nltk.download("wordnet")
+nltk.download("stopwords")
 
 WORD_RE = re.compile(r"[a-z0-9_-]+")
 STEMMER = PorterStemmer()
-STOP_WORDS = set(nltk.corpus.stopwords.words("english"))
+STOP_WORDS = set(stopwords.words("english"))
 AVAILABLE_LOCATIONS = ["USA", "China", "India", "Russia", "UK", "Germany"]
 
 def _normalize(word: str) -> str:
@@ -106,6 +107,60 @@ def recommend_articles(user_profile: Dict[str, Counter], articles: List[Dict]) -
 
     return sorted(recs, key=lambda x: x["score"], reverse=True)
 
+def analyze_activity(
+    activity_data: Union[List[Dict], Dict[str, Counter]], preferences: Dict
+) -> Dict[str, List[str]]:
+    keyword_counter = Counter()
+    category_counter = Counter()
+    location_counter = Counter()
+
+    if isinstance(activity_data, list):
+        for article in activity_data:
+            weight = article.get("interaction", 1)
+            text = f"{article.get('title', '')} {article.get('description', '')}"
+            for kw in extract_keywords(text):
+                keyword_counter[kw] += weight
+                for loc in AVAILABLE_LOCATIONS:
+                    if kw.lower() == loc.lower():
+                        location_counter[loc] += weight
+            if article.get("category"):
+                category_counter[article["category"]] += weight
+    else:
+        keyword_counter = activity_data.get("keywords", Counter())
+        category_counter = activity_data.get("categories", Counter())
+        location_counter = activity_data.get("locations", Counter())
+
+    # enrich with preferences
+    for kw in extract_keywords(preferences.get("keywords", "")):
+        keyword_counter[kw] += 2
+    for cat in preferences.get("categories", []):
+        category_counter[cat] += 2
+    for loc in preferences.get("locations", []):
+        location_counter[loc] += 2
+
+    return {
+        "keywords": [kw for kw, _ in keyword_counter.most_common(5)],
+        "categories": [cat for cat, _ in category_counter.most_common(5)],
+        "locations": [loc for loc, _ in location_counter.most_common(5)],
+    }
+
+
+def increment_interest_profile(profile: Dict[str, Counter], article: dict) -> Dict[str, Counter]:
+    category = article.get("category")
+    source = article.get("source")
+    text = f"{article.get('title', '')} {article.get('description', '')}"
+    weight = article.get("interaction", 1)
+
+    if category:
+        profile["categories"][category] += weight
+    if source:
+        profile["sources"][source] += weight
+    for word in set(extract_keywords(text)):
+        profile["keywords"][word] += weight
+        if word.title() in AVAILABLE_LOCATIONS:
+            profile["locations"][word.title()] += weight
+
+    return profile
 
 def rank_categories_by_tfidf(user_keywords: List[str], category_docs: Dict[str, str]) -> List[str]:
     if not category_docs:
