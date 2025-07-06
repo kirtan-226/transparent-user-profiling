@@ -29,7 +29,7 @@ def extract_keywords(text: str) -> List[str]:
     try:
         tagged = pos_tag(tokens)
     except Exception:
-        tagged = [(t, "") for t in tokens]
+        tagged = [(t, "NN") for t in tokens]
 
     for word, tag in tagged:
         if tag.startswith("NN") or tag.startswith("VB"):
@@ -89,16 +89,19 @@ def recommend_articles(user_profile: Dict[str, Counter], articles: List[Dict]) -
         keywords = extract_keywords(text)
 
         for kw in keywords:
-            score += 1.5 * user_profile["keywords"].get(kw, 0)
-            if user_profile["keywords"].get(kw):
+            weight = user_profile["keywords"].get(kw, 0)
+            if weight:
+                score += 1.5 * weight
                 explanation.append(f"Keyword match: {kw}")
 
         if article.get("source") in user_profile["sources"]:
-            score += user_profile["sources"][article["source"]]
+            src_weight = user_profile["sources"][article["source"]]
+            score += 2.0 * src_weight
             explanation.append(f"Source match: {article['source']}")
 
         if article.get("category") in user_profile["categories"]:
-            score += user_profile["categories"][article["category"]]
+            cat_weight = user_profile["categories"][article["category"]]
+            score += 2.5 * cat_weight
             explanation.append(f"Category match: {article['category']}")
 
         article["score"] = score
@@ -119,7 +122,7 @@ def analyze_activity(
             weight = article.get("interaction", 1)
             text = f"{article.get('title', '')} {article.get('description', '')}"
             for kw in extract_keywords(text):
-                keyword_counter[kw] += weight
+                keyword_counter[kw] += 2 * weight
                 for loc in AVAILABLE_LOCATIONS:
                     if kw.lower() == loc.lower():
                         location_counter[loc] += weight
@@ -139,7 +142,7 @@ def analyze_activity(
         location_counter[loc] += 2
 
     return {
-        "keywords": [kw for kw, _ in keyword_counter.most_common(5)],
+        "keywords": [kw for kw, _ in keyword_counter.most_common(10)],
         "categories": [cat for cat, _ in category_counter.most_common(5)],
         "locations": [loc for loc, _ in location_counter.most_common(5)],
     }
@@ -151,7 +154,7 @@ def increment_interest_profile(profile: Dict[str, Counter], article: dict) -> Di
     text = f"{article.get('title', '')} {article.get('description', '')}"
     weight = article.get("interaction", 1)
 
-    if category:
+    if category and category != "explore":
         profile["categories"][category] += weight
     if source:
         profile["sources"][source] += weight

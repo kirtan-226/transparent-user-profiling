@@ -75,7 +75,7 @@ try:
 except Exception as e:
     print(f"MongoDB connection error: {e}")
 
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "397dc406e6994441a97132e3f2a2d698")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "862309ce6bc0435383c01db4ed148b11")
 SECRET_KEY = os.getenv("SECRET_KEY", "qwerty@123")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
@@ -248,24 +248,49 @@ async def login_user(user: UserLogin):
 @app.post("/api/news/fetch")
 async def fetch_news(filters: NewsFilter, user_id: str = Depends(verify_token)):
     news_articles = []
-    
-    all_categories = ["business", "entertainment", "general", "health", "science", "sports", "technology"]
 
     categories_to_fetch = filters.categories or ["general"]
-    if "general" in categories_to_fetch and len(categories_to_fetch) == 1:
-        categories_to_fetch = all_categories
+
+    keyword_query = ""
+    if filters.keywords:
+        kw_list = extract_keywords(filters.keywords)
+        keyword_query = " OR ".join(kw_list) if kw_list else filters.keywords
+
+        # persist search keywords to the user's interest profile so future
+        # recommendations can leverage them
+        user = users_collection.find_one({"user_id": user_id}) or {}
+        profile = {
+            "categories": Counter(user.get("interest_profile", {}).get("categories", {})),
+            "sources": Counter(user.get("interest_profile", {}).get("sources", {})),
+            "keywords": Counter(user.get("interest_profile", {}).get("keywords", {})),
+            "locations": Counter(user.get("interest_profile", {}).get("locations", {})),
+        }
+        pseudo = {"category": None, "source": None, "title": filters.keywords, "description": ""}
+        profile = increment_interest_profile(profile, pseudo)
+        users_collection.update_one(
+            {"user_id": user_id},
+            {
+                "$set": {
+                    "interest_profile.categories": dict(profile["categories"]),
+                    "interest_profile.sources": dict(profile["sources"]),
+                    "interest_profile.keywords": dict(profile["keywords"]),
+                    "interest_profile.locations": dict(profile["locations"]),
+                }
+            },
+        )
 
     for category in categories_to_fetch:
         url = f"https://newsapi.org/v2/top-headlines?category={category}&apiKey={NEWS_API_KEY}"
         
         query_parts = []
-        if filters.keywords:
-            query_parts.append(filters.keywords)
+        if keyword_query:
+            query_parts.append(keyword_query)
         if filters.locations:
             query_parts.append(" OR ".join(filters.locations))
         if query_parts:
+            query = " ".join(query_parts)
             print("Final NewsAPI URL:", url)
-            url += "&q=" + quote_plus(" ".join(query_parts))
+            url += "&q=" + quote_plus(query)
         
         try:
             response = requests.get(url)
@@ -448,6 +473,10 @@ async def get_personalized_news(user_id: str = Depends(verify_token)):
     rec_categories = preferences.get("categories") or rec_data.get("categories", [])
     rec_keywords = preferences.get("keywords") or " ".join(rec_data.get("keywords", []))
 
+    pref_kw = preferences.get("keywords", "").strip()
+    profile_kw = " ".join(rec_data.get("keywords", []))
+    rec_keywords = " ".join([kw for kw in [pref_kw, profile_kw] if kw]).strip()
+
     print("🔍 Categories for fetch:", rec_categories)
     print("🔍 Keywords for fetch:", rec_keywords)
 
@@ -464,6 +493,8 @@ async def get_personalized_news(user_id: str = Depends(verify_token)):
     # Step 5: Score articles with recommend_articles
     articles = recommend_articles(user_profile, articles)
 
+    articles = [a for a in articles if a.get("score", 0) > 0]
+
     # Step 6: Optionally mix in trending if not enough personalized content
     if preferences.get("experimental_opt_in") and len(articles) < 10:
         trending = _fetch_trending_news(5)
@@ -471,6 +502,12 @@ async def get_personalized_news(user_id: str = Depends(verify_token)):
             article["explanation"] += " | Trending"
             article["_score"] = 0
         articles.extend(trending)
+    
+    if not articles:
+        articles = _fetch_trending_news(5)
+        for article in articles:
+            article["explanation"] += " | Trending"
+            article["_score"] = 0
 
     result["articles"] = articles
     return result
