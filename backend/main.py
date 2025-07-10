@@ -357,42 +357,61 @@ async def get_news_categories():
     return {"categories": categories}
 
 def _fetch_trending_news(limit: int = 10):
-    url = f"https://newsapi.org/v2/top-headlines?country=us&apiKey={NEWS_API_KEY}"
-    news_articles = []
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        news_data = response.json()
-        if news_data.get("status") == "ok" and "articles" in news_data:
-            articles = news_data.get("articles", [])
-            for article in articles[:limit]:
-                if not isinstance(article, dict):
-                    continue
-                article_id = str(uuid.uuid4())
-                source_info = article.get("source", {})
-                source_name = source_info.get("name", "Unknown") if isinstance(source_info, dict) else source_info
-                article_data = {
-                    "article_id": article_id,
-                    "title": article.get("title", "No Title"),
-                    "description": article.get("description", "No Description"),
-                    "url": article.get("url", "#"),
-                    "urlToImage": article.get("urlToImage", ""),
-                    "publishedAt": article.get("publishedAt", ""),
-                    "source": source_name,
-                    "category": "explore",
-                    "explanation": "Trending article",
-                    "created_at": datetime.now()
-                }
-                existing = news_collection.find_one({"title": article_data["title"]})
-                if not existing:
-                    news_collection.insert_one(article_data)
-                else:
-                    article_id = existing["article_id"]
-                    article_data["article_id"] = article_id
-                news_articles.append(article_data)
-    except Exception as e:
-        print(f"Error fetching trending news: {e}")
-    return news_articles
+    """Fetch trending articles with their categories."""
+    categories = [
+        "business",
+        "entertainment",
+        "general",
+        "health",
+        "science",
+        "sports",
+        "technology",
+    ]
+
+    per_cat = max(1, limit // len(categories))
+    news_articles: List[dict] = []
+
+    for category in categories:
+        url = (
+            f"https://newsapi.org/v2/top-headlines?country=us&category={category}&apiKey={NEWS_API_KEY}"
+        )
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            news_data = response.json()
+            if news_data.get("status") == "ok" and "articles" in news_data:
+                articles = news_data.get("articles", [])
+                for article in articles[:per_cat]:
+                    if not isinstance(article, dict):
+                        continue
+                    article_id = str(uuid.uuid4())
+                    source_info = article.get("source", {})
+                    source_name = (
+                        source_info.get("name", "Unknown") if isinstance(source_info, dict) else source_info
+                    )
+                    article_data = {
+                        "article_id": article_id,
+                        "title": article.get("title", "No Title"),
+                        "description": article.get("description", "No Description"),
+                        "url": article.get("url", "#"),
+                        "urlToImage": article.get("urlToImage", ""),
+                        "publishedAt": article.get("publishedAt", ""),
+                        "source": source_name,
+                        "category": category,
+                        "explanation": "Trending article",
+                        "created_at": datetime.now(),
+                    }
+                    existing = news_collection.find_one({"title": article_data["title"]})
+                    if not existing:
+                        news_collection.insert_one(article_data)
+                    else:
+                        article_id = existing["article_id"]
+                        article_data["article_id"] = article_id
+                    news_articles.append(article_data)
+        except Exception as e:
+            print(f"Error fetching trending news for {category}: {e}")
+
+    return news_articles[:limit]
 
 def _get_global_category_source_rankings(limit: int = 5):
     """Return most popular categories and sources across all users."""
@@ -471,6 +490,8 @@ async def get_personalized_news(user_id: str = Depends(verify_token)):
 
     # Step 3: Only get recommended categories & keywords
     rec_categories = preferences.get("categories") or rec_data.get("categories", [])
+    if not rec_categories:
+        rec_categories = _rank_categories_with_tfidf(user_profile, preferences)[:5]
     rec_keywords = preferences.get("keywords") or " ".join(rec_data.get("keywords", []))
 
     pref_kw = preferences.get("keywords", "").strip()

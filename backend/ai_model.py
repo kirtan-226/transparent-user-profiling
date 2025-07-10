@@ -154,7 +154,7 @@ def increment_interest_profile(profile: Dict[str, Counter], article: dict) -> Di
     text = f"{article.get('title', '')} {article.get('description', '')}"
     weight = article.get("interaction", 1)
 
-    if category and category != "explore":
+    if category:
         profile["categories"][category] += weight
     if source:
         profile["sources"][source] += weight
